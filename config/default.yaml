@@ -1,0 +1,91 @@
+# ============================================
+# stockQuant 默认配置
+# ============================================
+
+# ---------- 基础设置 ----------
+project:
+  name: stockQuant
+  version: 0.1.0
+  data_dir: ./data          # 本地数据存储目录
+  log_dir: ./logs           # 日志输出目录
+  log_level: INFO           # DEBUG / INFO / WARNING / ERROR
+
+# ---------- 数据源 ----------
+data_source:
+  primary: akshare          # 主数据源: akshare / baostock
+  fallback: baostock        # 备用数据源
+
+# ---------- 数据库 ----------
+database:
+  path: ./data/stockquant.duckdb
+  read_only: false
+
+# ---------- 股票池 ----------
+stock_pool:
+  # 指定股票代码列表（为空则使用全市场）
+  codes: []
+  # 排除标的
+  exclude_st: true          # 排除 ST 股
+  exclude_new: true         # 排除次新股（上市不满60天）
+  exclude_suspended: true   # 排除停牌股
+  blacklist: []             # 黑名单
+
+# ---------- 数据采集 ----------
+data_fetch:
+  start_date: "2020-01-01"  # 默认起始日期
+  end_date: ""              # 默认结束日期，空表示至今
+  adjust: qfq               # 复权方式: qfq(前复权) / hfq(后复权) / none
+  frequency: daily           # daily / weekly / monthly / 1min / 5min / 15min / 30min / 60min
+
+# ---------- 回测设置 ----------
+backtest:
+  initial_capital: 1000000.0   # 初始资金（元）
+  benchmark: "000300"          # 基准指数（沪深300）
+  commission_rate: 0.00025     # 佣金费率（万2.5）
+  stamp_duty_rate: 0.001       # 印花税率（千1，卖出时收取）
+  slippage: 0.002              # 滑点（0.2%）
+  min_commission: 5.0          # 最低佣金（元）
+  trade_unit: 100              # 交易单位（手 = 100股）
+  price_limit: 0.1             # 涨跌停幅度 10%
+  t_plus_1: true               # T+1 交易制度
+
+# ---------- 风控设置 ----------
+risk:
+  max_position_pct: 0.25       # 单只股票最大仓位占比
+  max_total_position_pct: 0.95 # 总仓位上限
+  max_drawdown_limit: 0.20     # 最大回撤熔断线
+  stop_loss:
+    enabled: true
+    method: fixed              # fixed / trailing / atr
+    fixed_pct: 0.08            # 固定止损比例
+    trailing_pct: 0.10         # 移动止损比例
+    atr_multiplier: 2.0        # ATR 止损倍数
+  take_profit:
+    enabled: true
+    method: fixed
+    fixed_pct: 0.20            # 固定止盈比例
+
+# ---------- 通知设置 ----------
+notify:
+  enabled: false
+  channels:
+    email:
+      enabled: false
+      smtp_server: ""
+      smtp_port: 465
+      sender: ""
+      password: ""
+      receivers: []
+    wechat:
+      enabled: false
+      webhook_url: ""
+    dingtalk:
+      enabled: false
+      webhook_url: ""
+      secret: ""
+
+# ---------- 调度设置 ----------
+scheduler:
+  enabled: false
+  data_update_cron: "0 18 * * 1-5"   # 每个交易日18:00更新数据
+  strategy_run_cron: "0 9 * * 1-5"    # 每个交易日09:00运行策略

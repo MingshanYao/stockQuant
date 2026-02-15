@@ -1,0 +1,45 @@
+# ============================================
+# stockQuant .gitignore
+# ============================================
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 数据文件
+data/*.duckdb
+data/*.duckdb.wal
+*.parquet
+*.h5
+*.hdf5
+
+# 日志
+logs/
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+
+# 配置（用户私有配置）
+config/local.yaml
+config/secrets.yaml
