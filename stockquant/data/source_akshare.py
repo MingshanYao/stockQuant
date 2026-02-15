@@ -143,6 +143,12 @@ class AkShareDataSource(BaseDataSource):
         df["code"] = code
         if "date" in df.columns:
             df["date"] = pd.to_datetime(df["date"])
+        # 只保留数据库 daily_bars 表中定义的列，丢弃多余列（如 股票代码、振幅）
+        standard_cols = [
+            "code", "date", "open", "high", "low", "close",
+            "volume", "amount", "turnover", "pct_change", "change",
+        ]
+        df = df[[c for c in standard_cols if c in df.columns]]
         return df
 
     @staticmethod
