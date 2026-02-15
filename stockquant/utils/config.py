@@ -13,6 +13,9 @@ import yaml
 
 _DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config" / "default.yaml"
 
+# 项目根目录（config/default.yaml 所在目录的上一级）
+PROJECT_ROOT: Path = _DEFAULT_CONFIG_PATH.parent.parent
+
 
 class Config:
     """分层配置管理器。
@@ -55,6 +58,27 @@ class Config:
             if node is None:
                 return default
         return node
+
+    def resolve_path(self, key: str, default: str = ".") -> Path:
+        """获取配置中的路径值，并将相对路径解析为相对于项目根目录的绝对路径。
+
+        Parameters
+        ----------
+        key : str
+            点分路径配置键，如 ``"database.path"``。
+        default : str
+            配置不存在时的默认值。
+
+        Returns
+        -------
+        Path
+            解析后的绝对路径。
+        """
+        raw = self.get(key, default)
+        p = Path(raw)
+        if p.is_absolute():
+            return p
+        return (PROJECT_ROOT / p).resolve()
 
     def set(self, key: str, value: Any) -> None:
         """运行时动态设置配置项。"""

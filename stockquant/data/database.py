@@ -30,7 +30,7 @@ class Database:
         if db_path is None:
             from stockquant.utils.config import Config
             cfg = Config()
-            db_path = cfg.get("database.path", "./data/stockquant.duckdb")
+            db_path = cfg.resolve_path("database.path", "./stockquant/data/db/stockquant.duckdb")
 
         self._db_path = Path(db_path)
         self._db_path.parent.mkdir(parents=True, exist_ok=True)

@@ -30,7 +30,7 @@ def _init_logger() -> None:
 
     cfg = Config()
     log_level = cfg.get("project.log_level", "INFO")
-    log_dir = Path(cfg.get("project.log_dir", "./logs"))
+    log_dir = cfg.resolve_path("project.log_dir", "./logs")
     log_dir.mkdir(parents=True, exist_ok=True)
 
     fmt = (

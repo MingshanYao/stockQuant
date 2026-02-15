@@ -6,8 +6,8 @@
 project:
   name: stockQuant
   version: 0.1.0
-  data_dir: ./data          # 本地数据存储目录
-  log_dir: ./logs           # 日志输出目录
+  data_dir: ./data          # 本地数据存储目录（相对于项目根目录）
+  log_dir: ./logs           # 日志输出目录（相对于项目根目录）
   log_level: INFO           # DEBUG / INFO / WARNING / ERROR
 
 # ---------- 数据源 ----------
@@ -17,7 +17,7 @@ data_source:
 
 # ---------- 数据库 ----------
 database:
-  path: ./data/stockquant.duckdb
+  path: ./stockquant/data/db/stockquant.duckdb   # 相对于项目根目录
   read_only: false
 
 # ---------- 股票池 ----------
@@ -34,7 +34,7 @@ stock_pool:
 data_fetch:
   start_date: "2020-01-01"  # 默认起始日期
   end_date: ""              # 默认结束日期，空表示至今
-  adjust: qfq               # 复权方式: qfq(前复权) / hfq(后复权) / none
+  adjust: hfq               # 复权方式: qfq(前复权) / hfq(后复权) / none
   frequency: daily           # daily / weekly / monthly / 1min / 5min / 15min / 30min / 60min
 
 # ---------- 回测设置 ----------
