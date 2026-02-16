@@ -87,7 +87,7 @@ class DataManager:
         code = normalize_stock_code(code)
         start_date = ensure_date(start_date or self.cfg.get("data_fetch.start_date", "2020-01-01"))
         end_date = ensure_date(end_date) or dt.date.today()
-        adjust = adjust or self.cfg.get("data_fetch.adjust", "qfq")
+        adjust = adjust or self.cfg.get("data_fetch.adjust", "hfq")
 
         # 尝试从本地读取
         local_df = self._load_local_daily(code, start_date, end_date)

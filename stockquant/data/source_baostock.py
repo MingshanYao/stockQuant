@@ -57,7 +57,7 @@ class BaoStockDataSource(BaseDataSource):
         code: str,
         start_date: str | dt.date,
         end_date: str | dt.date,
-        adjust: str = "qfq",
+        adjust: str = "hfq",
     ) -> pd.DataFrame:
         code = normalize_stock_code(code)
         prefix = "sh" if code.startswith(("6", "9")) else "sz"
@@ -75,7 +75,7 @@ class BaoStockDataSource(BaseDataSource):
                 start_date=sd,
                 end_date=ed,
                 frequency="d",
-                adjustflag=adjust_map.get(adjust, "2"),
+                adjustflag=adjust_map.get(adjust, "1"),
             )
             rows = []
             while rs.error_code == "0" and rs.next():

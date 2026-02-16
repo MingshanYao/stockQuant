@@ -38,7 +38,7 @@ class AkShareDataSource(BaseDataSource):
         code: str,
         start_date: str | dt.date,
         end_date: str | dt.date,
-        adjust: str = "qfq",
+        adjust: str = "hfq",
     ) -> pd.DataFrame:
         code = normalize_stock_code(code)
         start_str = str(ensure_date(start_date)).replace("-", "")
@@ -47,7 +47,7 @@ class AkShareDataSource(BaseDataSource):
         logger.debug(f"AkShare 日线: {code} [{start_str} ~ {end_str}] adjust={adjust}")
 
         adjust_map = {"qfq": "qfq", "hfq": "hfq", "none": ""}
-        ak_adjust = adjust_map.get(adjust, "qfq")
+        ak_adjust = adjust_map.get(adjust, "hfq")
 
         try:
             df = ak.stock_zh_a_hist(

@@ -35,7 +35,7 @@ class BaseDataSource(ABC):
         code: str,
         start_date: str | dt.date,
         end_date: str | dt.date,
-        adjust: str = "qfq",
+        adjust: str = "hfq",
     ) -> pd.DataFrame:
         """获取日线行情数据。
 

@@ -372,7 +372,7 @@ class DataUpdater:
         dict[str, int]
             {code: 实际写入行数}，失败的股票不包含在内。
         """
-        adjust = adjust or self.cfg.get("data_fetch.adjust", "qfq")
+        adjust = adjust or self.cfg.get("data_fetch.adjust", "hfq")
         end_date = ensure_date(end_date) or dt.date.today()
 
         total = len(codes)

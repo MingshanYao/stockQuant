@@ -65,7 +65,7 @@ def config(tmp_db_path) -> Config:
     cfg.set("database.path", str(tmp_db_path))
     cfg.set("data_source.primary", "akshare")
     cfg.set("data_fetch.start_date", str(START_DATE))
-    cfg.set("data_fetch.adjust", "qfq")
+    cfg.set("data_fetch.adjust", "hfq")
     return cfg
 
 
@@ -110,7 +110,7 @@ def all_daily_data(hs300_codes, data_source, cleaner, db) -> dict[str, pd.DataFr
         code = normalize_stock_code(code)
         try:
             # 1. 远程拉取
-            df = data_source.get_daily_bars(code, START_DATE, END_DATE, adjust="qfq")
+            df = data_source.get_daily_bars(code, START_DATE, END_DATE, adjust="hfq")
             if df.empty:
                 failed.append(code)
                 print(f"  [{i:3d}/{total}] {code} ⚠ 空数据", flush=True)
