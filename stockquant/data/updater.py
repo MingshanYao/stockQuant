@@ -32,6 +32,9 @@ from typing import Sequence
 import akshare as ak
 import pandas as pd
 import argparse
+import concurrent.futures
+import queue
+import threading
 import sys
 from typing import Callable, Any
 
@@ -414,37 +417,92 @@ class DataUpdater:
         failed: list[str] = []
         t_start = time.time()
 
-        for i, code in enumerate(codes, 1):
+        fetch_timeout = int(self.cfg.get("data_fetch.timeout", 30))
+        max_workers = int(self.cfg.get("data_fetch.max_workers", 5))
+        q_maxsize = int(self.cfg.get("data_fetch.queue_maxsize", 200))
+
+        # ---- 结果队列：抓取线程 → 写入线程 ----
+        # 元素: (code, DataFrame | None, Exception | None)  或  None 表示结束
+        write_q: queue.Queue[tuple[str, pd.DataFrame | None, Exception | None] | None] = (
+            queue.Queue(maxsize=q_maxsize)
+        )
+        lock = threading.Lock()
+        processed = 0
+
+        # ---- 写入线程：串行写 DB ----
+        def _writer() -> None:
+            nonlocal processed
+            while True:
+                item = write_q.get()
+                if item is None:          # 毒丸：退出信号
+                    write_q.task_done()
+                    break
+                w_code, df, err = item
+                try:
+                    if err is not None:
+                        with lock:
+                            failed.append(w_code)
+                        logger.warning(f"{w_code} 拉取出错: {err}")
+                    elif df is None or df.empty:
+                        with lock:
+                            results[w_code] = 0
+                    else:
+                        df = self.cleaner.clean_pipeline(df)
+                        rows = self.db.save_dataframe(df, "daily_bars")
+                        with lock:
+                            results[w_code] = rows
+                except Exception as e:
+                    with lock:
+                        failed.append(w_code)
+                    logger.warning(f"{w_code} 写入失败: {e}")
+                finally:
+                    with lock:
+                        processed += 1
+                        cur = processed
+                    write_q.task_done()
+                    if cur % 100 == 0 or cur == total:
+                        elapsed = time.time() - t_start
+                        speed = cur / elapsed if elapsed > 0 else 0
+                        logger.info(
+                            f"[{cur}/{total}] 已完成 | 成功 {len(results)} | "
+                            f"失败 {len(failed)} | 速率 {speed:.1f} 只/s"
+                        )
+
+        writer_t = threading.Thread(target=_writer, daemon=True)
+        writer_t.start()
+
+        # ---- 抓取函数（在线程池中执行） ----
+        def _fetch_one(code: str) -> None:
             code = normalize_stock_code(code)
             try:
-                # 增量更新：从数据库中已有的最新日期的下一天开始拉取
                 sd = self._resolve_start_date(code, start_date)
                 if sd > end_date:
-                    # 数据已是最新
-                    results[code] = 0
-                    continue
-
-                df = self._source.get_daily_bars(code, sd, end_date, adjust)
-                if df.empty:
-                    results[code] = 0
-                    continue
-
-                df = self.cleaner.clean_pipeline(df)
-                rows = self.db.save_dataframe(df, "daily_bars")
-                results[code] = rows
-
+                    write_q.put((code, pd.DataFrame(), None))
+                    return
+                # 内部用单独线程 + timeout 防止单次请求卡死
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _ex:
+                    fut = _ex.submit(
+                        self._source.get_daily_bars, code, sd, end_date, adjust
+                    )
+                    try:
+                        df = fut.result(timeout=fetch_timeout)
+                    except concurrent.futures.TimeoutError:
+                        fut.cancel()
+                        raise TimeoutError(f"拉取 {code} 超时 ({fetch_timeout}s)")
+                write_q.put((code, df, None))
             except Exception as e:
-                failed.append(code)
-                logger.warning(f"[{i}/{total}] {code} 更新失败: {e}")
+                write_q.put((code, None, e))
 
-            # 进度日志
-            if i % 100 == 0 or i == total:
-                elapsed = time.time() - t_start
-                speed = i / elapsed if elapsed > 0 else 0
-                logger.info(
-                    f"[{i}/{total}] 已完成 | 成功 {len(results)} | "
-                    f"失败 {len(failed)} | 速率 {speed:.1f} 只/s"
-                )
+        # ---- 并发提交抓取 ----
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = [pool.submit(_fetch_one, c) for c in codes]
+            # 等待所有抓取完成（异常已在 _fetch_one 内捕获并入队）
+            concurrent.futures.wait(futures)
+
+        # ---- 通知写线程退出并等待 ----
+        write_q.join()          # 先等队列消费完
+        write_q.put(None)       # 发送毒丸
+        writer_t.join()
 
         elapsed = time.time() - t_start
         logger.info(
