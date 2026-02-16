@@ -31,6 +31,9 @@ from typing import Sequence
 
 import akshare as ak
 import pandas as pd
+import argparse
+import sys
+from typing import Callable, Any
 
 from stockquant.data.data_source import DataSourceFactory, BaseDataSource
 from stockquant.data.database import Database
@@ -130,8 +133,12 @@ def get_index_constituents(index_code: str) -> list[str]:
     """
     index_code = normalize_stock_code(index_code)
     logger.info(f"获取指数 {index_code} 成分股列表")
+
+    def _call() -> pd.DataFrame:
+        return ak.index_stock_cons(symbol=index_code)
+
     try:
-        df = ak.index_stock_cons(symbol=index_code)
+        df = _call_with_retries(_call)
         codes = df["品种代码"].astype(str).str.zfill(6).drop_duplicates().tolist()
         logger.info(f"指数 {index_code} 成分股: {len(codes)} 只")
         return codes
@@ -143,8 +150,12 @@ def get_index_constituents(index_code: str) -> list[str]:
 def get_all_a_codes() -> list[str]:
     """获取全部 A 股代码列表。"""
     logger.info("获取全部 A 股代码列表")
+
+    def _call() -> pd.DataFrame:
+        return ak.stock_info_a_code_name()
+
     try:
-        df = ak.stock_info_a_code_name()
+        df = _call_with_retries(_call)
         df.columns = ["code", "name"]
         codes = df["code"].astype(str).str.zfill(6).tolist()
         logger.info(f"全部 A 股: {len(codes)} 只")
@@ -152,6 +163,29 @@ def get_all_a_codes() -> list[str]:
     except Exception as e:
         logger.error(f"获取 A 股列表失败: {e}")
         return []
+
+
+def _call_with_retries(
+    fn: Callable[[], Any], attempts: int = 3, delay: float = 1.0, backoff: float = 2.0
+) -> Any:
+    """在发生异常时重试调用可调用对象。
+
+    在多数网络抖动场景下可减少临时错误导致的失败。
+    """
+    last_exc: Exception | None = None
+    cur_delay = delay
+    for i in range(1, attempts + 1):
+        try:
+            return fn()
+        except Exception as e:
+            last_exc = e
+            logger.warning(f"尝试第 {i}/{attempts} 次失败: {e}")
+            if i == attempts:
+                break
+            time.sleep(cur_delay)
+            cur_delay *= backoff
+    # 最后抛出最近一次异常以便上层处理和记录
+    raise last_exc
 
 
 # ======================================================================
@@ -445,3 +479,90 @@ class DataUpdater:
         # 回退到用户指定 / 配置默认
         fallback = user_start or self.cfg.get("data_fetch.start_date", "2020-01-01")
         return ensure_date(fallback) or dt.date(2020, 1, 1)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="批量更新日线数据 (stockquant 数据更新器)")
+    parser.add_argument(
+        "--mode",
+        choices=(
+            "hs300",
+            "csi500",
+            "csi1000",
+            "csi2000",
+            "index",
+            "all",
+            "star",
+            "bse",
+            "main_board",
+            "gem",
+            "codes",
+        ),
+        default="hs300",
+        help="更新模式，默认 hs300",
+    )
+    parser.add_argument("--index-code", help="当 mode=index 时，指定指数代码，例如 000300")
+    parser.add_argument(
+        "--codes",
+        nargs="+",
+        help="当 mode=codes 时，指定要更新的股票代码列表（空格分隔，多个）",
+    )
+    parser.add_argument("--start-date", help="起始日期，格式 YYYY-MM-DD")
+    parser.add_argument("--end-date", help="结束日期，格式 YYYY-MM-DD")
+    parser.add_argument("--adjust", choices=("qfq", "hfq", "none"), help="复权方式")
+    parser.add_argument("--no-star", dest="include_star", action="store_false", help="排除科创板")
+    parser.add_argument("--no-bse", dest="include_bse", action="store_false", help="排除北交所")
+    parser.add_argument("--no-gem", dest="include_gem", action="store_false", help="排除创业板")
+
+    args = parser.parse_args()
+
+    updater = DataUpdater()
+
+    try:
+        mode = args.mode
+        common_kwargs = {
+            "start_date": args.start_date,
+            "end_date": args.end_date,
+            "adjust": args.adjust,
+            "include_star": args.include_star,
+            "include_bse": args.include_bse,
+            "include_gem": args.include_gem,
+        }
+
+        if mode == "hs300":
+            res = updater.update_hs300_daily(**common_kwargs)
+        elif mode == "csi500":
+            res = updater.update_csi500_daily(**common_kwargs)
+        elif mode == "csi1000":
+            res = updater.update_csi1000_daily(**common_kwargs)
+        elif mode == "csi2000":
+            res = updater.update_csi2000_daily(**common_kwargs)
+        elif mode == "index":
+            if not args.index_code:
+                parser.error("--index-code 必须在 mode=index 时提供")
+            res = updater.update_index_daily(args.index_code, **common_kwargs)
+        elif mode == "all":
+            res = updater.update_all_daily(**common_kwargs)
+        elif mode == "star":
+            res = updater.update_star_daily(**common_kwargs)
+        elif mode == "bse":
+            res = updater.update_bse_daily(**common_kwargs)
+        elif mode == "main_board":
+            res = updater.update_main_board_daily(**common_kwargs)
+        elif mode == "gem":
+            res = updater.update_gem_daily(**common_kwargs)
+        elif mode == "codes":
+            if not args.codes:
+                parser.error("--codes 在 mode=codes 时不能为空")
+            res = updater.update_codes_daily(args.codes, **common_kwargs)
+        else:
+            parser.error(f"未知 mode: {mode}")
+
+        # 打印结果汇总
+        total_written = sum(res.values()) if res else 0
+        print(f"更新完成: {len(res)} 支股票, 写入行数总计: {total_written}")
+
+    except Exception as e:
+        logger.exception(f"更新过程中发生错误: {e}")
+        sys.exit(2)
+    
