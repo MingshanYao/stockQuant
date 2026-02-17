@@ -24,6 +24,7 @@ env/
 *~
 
 # 数据文件
+*.duckdb
 *.duckdb.wal
 *.parquet
 *.h5
