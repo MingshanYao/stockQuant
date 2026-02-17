@@ -55,6 +55,14 @@ INDEX_CSI500 = "000905"  # 中证500
 INDEX_CSI1000 = "000852"  # 中证1000
 INDEX_CSI2000 = "932000"  # 中证2000
 
+# 默认 Benchmark 指数列表
+BENCHMARK_INDICES: dict[str, str] = {
+    INDEX_HS300: "沪深300",
+    INDEX_CSI500: "中证500",
+    INDEX_CSI1000: "中证1000",
+    INDEX_CSI2000: "中证2000",
+}
+
 # ======================================================================
 # 板块代码前缀
 # ======================================================================
@@ -392,6 +400,105 @@ class DataUpdater:
         return self._batch_update(codes, start_date, end_date, adjust)
 
     # ------------------------------------------------------------------
+    # 公开接口：更新 Benchmark 指数日线
+    # ------------------------------------------------------------------
+
+    def update_benchmark_indices(
+        self,
+        index_codes: Sequence[str] | None = None,
+        start_date: str | dt.date | None = None,
+        end_date: str | dt.date | None = None,
+    ) -> dict[str, int]:
+        """更新 Benchmark 指数自身的日线行情数据（写入 index_daily 表）。
+
+        用于策略回测时的基准对比（如沪深300、中证500/1000/2000）。
+
+        Parameters
+        ----------
+        index_codes : list[str], optional
+            要更新的指数代码列表，默认为
+            沪深300 / 中证500 / 中证1000 / 中证2000。
+        start_date / end_date : str | date, optional
+            起止日期，默认使用配置值或增量更新。
+
+        Returns
+        -------
+        dict[str, int]
+            {指数代码: 写入行数}。
+        """
+        if index_codes is None:
+            index_codes = list(BENCHMARK_INDICES.keys())
+
+        end_date = ensure_date(end_date) or dt.date.today()
+        results: dict[str, int] = {}
+
+        for code in index_codes:
+            code = normalize_stock_code(code)
+            label = BENCHMARK_INDICES.get(code, code)
+            try:
+                sd = self._resolve_index_start_date(code, start_date)
+                if sd > end_date:
+                    logger.info(f"指数 {label}({code}) 已是最新，无需更新")
+                    results[code] = 0
+                    continue
+
+                logger.info(f"拉取指数 {label}({code}) 日线 [{sd} ~ {end_date}]")
+                df = _call_with_retries(
+                    lambda c=code, s=sd, e=end_date: self._source.get_index_daily(c, s, e)
+                )
+                if df is None or df.empty:
+                    logger.warning(f"指数 {label}({code}) 返回空数据")
+                    results[code] = 0
+                    continue
+
+                rows = self.db.save_dataframe(df, "index_daily")
+                results[code] = rows
+                logger.info(f"指数 {label}({code}) 写入 {rows} 行")
+            except Exception as e:
+                logger.error(f"更新指数 {label}({code}) 失败: {e}")
+                results[code] = 0
+
+        total_rows = sum(results.values())
+        logger.info(f"Benchmark 指数更新完成: {len(results)} 个指数, 共写入 {total_rows} 行")
+        return results
+
+    def update_single_index(
+        self,
+        index_code: str,
+        start_date: str | dt.date | None = None,
+        end_date: str | dt.date | None = None,
+    ) -> int:
+        """更新单个指数的日线行情数据。
+
+        Parameters
+        ----------
+        index_code : str
+            指数代码，如 "000300"。
+
+        Returns
+        -------
+        int
+            写入行数。
+        """
+        res = self.update_benchmark_indices([index_code], start_date, end_date)
+        return res.get(normalize_stock_code(index_code), 0)
+
+    def _resolve_index_start_date(
+        self,
+        code: str,
+        user_start: str | dt.date | None,
+    ) -> dt.date:
+        """决定指数的拉取起始日期（增量更新逻辑）。"""
+        if user_start is None:
+            latest = self.db.get_latest_date("index_daily", code)
+            if latest:
+                latest_date = ensure_date(latest)
+                if latest_date:
+                    return latest_date + dt.timedelta(days=1)
+        fallback = user_start or self.cfg.get("data_fetch.start_date", "2020-01-01")
+        return ensure_date(fallback) or dt.date(2020, 1, 1)
+
+    # ------------------------------------------------------------------
     # 内部：批量更新核心逻辑
     # ------------------------------------------------------------------
 
@@ -555,9 +662,10 @@ if __name__ == "__main__":
             "main_board",
             "gem",
             "codes",
+            "benchmark",
         ),
         default="hs300",
-        help="更新模式，默认 hs300",
+        help="更新模式，默认 hs300。benchmark 模式更新指数自身行情(沪深300/中证500/1000/2000)",
     )
     parser.add_argument("--index-code", help="当 mode=index 时，指定指数代码，例如 000300")
     parser.add_argument(
@@ -613,6 +721,16 @@ if __name__ == "__main__":
             if not args.codes:
                 parser.error("--codes 在 mode=codes 时不能为空")
             res = updater.update_codes_daily(args.codes, **common_kwargs)
+        elif mode == "benchmark":
+            # benchmark 模式只需 start_date / end_date，不需要板块过滤参数
+            benchmark_kwargs = {
+                "start_date": args.start_date,
+                "end_date": args.end_date,
+            }
+            # 若用户通过 --codes 指定了特定指数代码，使用之；否则用默认四大指数
+            if args.codes:
+                benchmark_kwargs["index_codes"] = args.codes
+            res = updater.update_benchmark_indices(**benchmark_kwargs)
         else:
             parser.error(f"未知 mode: {mode}")
 

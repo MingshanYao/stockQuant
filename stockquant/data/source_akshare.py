@@ -80,15 +80,33 @@ class AkShareDataSource(BaseDataSource):
         start_str = str(ensure_date(start_date)).replace("-", "")
         end_str = str(ensure_date(end_date)).replace("-", "")
 
-        logger.debug(f"AkShare 指数日线: {code}")
+        logger.debug(f"AkShare 指数日线: {code} [{start_str} ~ {end_str}]")
+
+        # 优先使用 index_zh_a_hist（覆盖所有指数，含中证2000等）
+        try:
+            df = ak.index_zh_a_hist(
+                symbol=code, period="daily",
+                start_date=start_str, end_date=end_str,
+            )
+            if not df.empty:
+                return self._standardize_index(df, code)
+        except Exception as e:
+            logger.debug(f"index_zh_a_hist({code}) 失败，尝试备用接口: {e}")
+
+        # 备用：stock_zh_index_daily（部分老指数仅此接口有数据）
         try:
             df = ak.stock_zh_index_daily(symbol=f"{get_market_prefix(code)}{code}")
-            df = df[(df["date"] >= start_str) & (df["date"] <= end_str)]
+            if not df.empty:
+                # 统一 date 列为 datetime 再过滤
+                df["date"] = pd.to_datetime(df["date"])
+                sd = pd.Timestamp(ensure_date(start_date))
+                ed = pd.Timestamp(ensure_date(end_date))
+                df = df[(df["date"] >= sd) & (df["date"] <= ed)]
+                return self._standardize_index(df, code)
         except Exception as e:
             logger.error(f"获取指数 {code} 日线失败: {e}")
-            return pd.DataFrame()
 
-        return self._standardize_index(df, code)
+        return pd.DataFrame()
 
     # ------------------------------------------------------------------
     # 基本财务
@@ -153,10 +171,28 @@ class AkShareDataSource(BaseDataSource):
 
     @staticmethod
     def _standardize_index(df: pd.DataFrame, code: str) -> pd.DataFrame:
+        """标准化指数日线 DataFrame，输出列与 index_daily 表对齐。"""
         df = df.copy()
+
+        # index_zh_a_hist 返回中文列名，stock_zh_index_daily 返回英文列名
+        col_map = {
+            "日期": "date",
+            "开盘": "open",
+            "收盘": "close",
+            "最高": "high",
+            "最低": "low",
+            "成交量": "volume",
+            "成交额": "amount",
+        }
+        df = df.rename(columns=col_map)
+
         df["code"] = code
         if "date" in df.columns:
             df["date"] = pd.to_datetime(df["date"])
+
+        # 只保留 index_daily 表定义的列
+        standard_cols = ["code", "date", "open", "high", "low", "close", "volume", "amount"]
+        df = df[[c for c in standard_cols if c in df.columns]]
         return df
 
 
