@@ -159,14 +159,14 @@ class PlotEngine:
                 fig.add_trace(go.Scatter(
                     x=buys["date"], y=buys["price"],
                     mode="markers", name="买入",
-                    marker=dict(symbol="triangle-up", size=10, color="red"),
+                    marker=dict(symbol="triangle-up", size=10, color="magenta"),
                 ), row=1, col=1)
 
             if not sells.empty:
                 fig.add_trace(go.Scatter(
                     x=sells["date"], y=sells["price"],
                     mode="markers", name="卖出",
-                    marker=dict(symbol="triangle-down", size=10, color="green"),
+                    marker=dict(symbol="triangle-down", size=10, color="blue"),
                 ), row=1, col=1)
 
         fig.update_layout(title=title, xaxis_rangeslider_visible=False)
