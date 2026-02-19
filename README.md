@@ -7,7 +7,7 @@
 ```
 ├── stockquant/
 │   ├── data/                  # 数据采集与管理
-│   ├── indicators/            # 技术指标计算
+│   ├── indicators/            # 技术指标计算（含 Alpha101 因子库）
 │   ├── strategy/              # 策略开发框架
 │   ├── backtest/              # 回测引擎
 │   ├── risk/                  # 风控模块
@@ -83,6 +83,44 @@ python3 -m updater --mode benchmark --start-date 2015-01-01 --end-date 2025-12-3
 ### 7. 因子分析（进阶）
 
 因子计算、IC/IR检验、分组回测、因子合成（等权/ICIR加权）、行业市值中性化。
+
+### 7.1 Alpha101 因子库
+
+基于 Kakushadze (2016) *"101 Formulaic Alphas"* 论文，完整实现全部 101 个量价因子公式。
+
+**核心特性：**
+- 📊 **全量实现** — 101 个 Alpha 因子全覆盖
+- 🚀 **向量化运算** — 基于 Pandas/NumPy，支持全市场截面计算
+- 🏭 **面板数据** — 行=日期, 列=股票代码，天然支持多股票并行
+- 🔌 **灵活接入** — 支持从堆叠 DataFrame / 单股票 DataFrame 直接构建
+- 🏢 **行业中性化** — 可选传入行业分类数据启用 IndNeutralize
+
+**快速使用：**
+```python
+from stockquant.indicators import Alpha101Indicators
+
+# 单股票模式 (BaseIndicator 标准接口)
+ind = Alpha101Indicators()
+df = ind.compute(df)                         # 附加全部因子列
+df = ind.compute(df, alphas=[1, 6, 101])     # 只计算指定因子
+
+# 多股票面板模式
+engine = Alpha101Indicators.panel(
+    open_=open_df, high=high_df, low=low_df,
+    close=close_df, volume=volume_df,
+)
+factor_1 = engine.alpha001()            # 计算单个因子
+all_factors = engine.compute_all()      # 批量计算全部因子
+
+# 从堆叠 DataFrame (date, code, OHLCV) 快速构建
+engine = Alpha101Indicators.from_stacked_df(df)
+
+# 结合因子分析
+from stockquant.analysis import FactorAnalyzer
+ic = FactorAnalyzer.calc_ic(factor_1['2025-03-25'], forward_returns)
+```
+
+**运算符模块** (`stockquant.indicators.alpha101.operators`): 提供 `rank`, `scale`, `delay`, `delta`, `ts_corr`, `decay_linear` 等 20+ 因子运算符，可独立使用。
 
 ### 8. 可视化
 
