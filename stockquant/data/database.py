@@ -76,13 +76,22 @@ class Database:
 
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS stock_info (
-                code   VARCHAR PRIMARY KEY,
-                name   VARCHAR,
-                market VARCHAR,
-                list_date DATE,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                code          VARCHAR PRIMARY KEY,
+                name          VARCHAR,
+                industry      VARCHAR,
+                sector        VARCHAR,
+                market        VARCHAR,
+                list_date     DATE,
+                total_shares  DOUBLE,
+                float_shares  DOUBLE,
+                total_cap     DOUBLE,
+                float_cap     DOUBLE,
+                updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+
+        # 兼容旧表：若缺少新字段则自动追加
+        self._ensure_stock_info_columns()
 
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS index_daily (
@@ -99,6 +108,33 @@ class Database:
         """)
 
         logger.info("数据库表初始化完成")
+
+    def _ensure_stock_info_columns(self) -> None:
+        """兼容旧版 stock_info 表：若缺少新字段则 ALTER TABLE 追加。"""
+        expected = {
+            "industry": "VARCHAR",
+            "sector": "VARCHAR",
+            "total_shares": "DOUBLE",
+            "float_shares": "DOUBLE",
+            "total_cap": "DOUBLE",
+            "float_cap": "DOUBLE",
+        }
+        try:
+            existing = {
+                row[0]
+                for row in self.conn.execute(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name = 'stock_info'"
+                ).fetchall()
+            }
+            for col, dtype in expected.items():
+                if col not in existing:
+                    self.conn.execute(
+                        f"ALTER TABLE stock_info ADD COLUMN {col} {dtype}"
+                    )
+                    logger.info(f"stock_info 表追加列: {col} {dtype}")
+        except Exception as e:
+            logger.warning(f"stock_info 列检查/追加失败: {e}")
 
     # ------------------------------------------------------------------
     # CRUD
@@ -132,12 +168,13 @@ class Database:
         if if_exists == "replace":
             self.conn.execute(f"DELETE FROM {table}")
 
-        # 使用临时表做 INSERT OR IGNORE
+        # 使用临时表做 INSERT OR IGNORE（显式列名，避免列顺序不一致）
         tmp = f"_tmp_{table}"
         self.conn.register(tmp, df)
+        cols = ", ".join(df.columns)
         self.conn.execute(f"""
-            INSERT OR IGNORE INTO {table}
-            SELECT * FROM {tmp}
+            INSERT OR IGNORE INTO {table} ({cols})
+            SELECT {cols} FROM {tmp}
         """)
         self.conn.unregister(tmp)
 

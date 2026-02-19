@@ -13,6 +13,9 @@
     # 最常用：更新 Benchmark 指数行情（沪深300/中证500/1000/2000）
     updater.update_benchmark_indices()
 
+    # 更新股票基本信息（行业/市值等）
+    updater.update_stock_info()
+
     # 更新某个指数成分股日线
     updater.update_index_daily("000300")
 
@@ -22,6 +25,7 @@
 命令行::
 
     python -m stockquant.data.updater                  # 默认更新全部 A 股
+    python -m stockquant.data.updater --mode stock_info  # 更新股票基本信息
     python -m stockquant.data.updater --mode benchmark # 更新 Benchmark 指数
     python -m stockquant.data.updater --mode index --index-code 000300
     python -m stockquant.data.updater --mode codes --codes 000001 600519
@@ -31,11 +35,8 @@
 from __future__ import annotations
 
 import argparse
-import concurrent.futures
 import datetime as dt
-import queue
 import sys
-import threading
 import time
 from typing import Any, Callable, Sequence
 
@@ -45,6 +46,7 @@ import pandas as pd
 from stockquant.data.data_cleaner import DataCleaner
 from stockquant.data.data_source import BaseDataSource, DataSourceFactory
 from stockquant.data.database import Database
+from stockquant.utils.concurrent import parallel_fetch_serial_consume
 from stockquant.utils.config import Config
 from stockquant.utils.helpers import ensure_date, normalize_stock_code
 from stockquant.utils.logger import get_logger
@@ -341,6 +343,46 @@ class DataUpdater:
         )
         return results
 
+    def update_stock_info(self) -> int:
+        """更新全市场股票基本信息（行业/市值等），写入 stock_info 表。
+
+        数据源通过 ``get_stock_info()`` 一次性获取全市场快照，
+        包含 code, name, industry, sector, market, total_cap, float_cap 等。
+
+        Returns
+        -------
+        int
+            写入行数。
+        """
+        logger.info("开始更新股票基本信息")
+        try:
+            df = _call_with_retries(self._source.get_stock_info)
+        except Exception as e:
+            logger.error(f"获取股票基本信息失败: {e}")
+            return 0
+
+        if df.empty:
+            logger.warning("股票基本信息返回空数据")
+            return 0
+
+        # 清洗字段类型，避免写入时 DuckDB 类型转换错误
+        if "list_date" in df.columns:
+            df["list_date"] = pd.to_datetime(df["list_date"], errors="coerce").dt.date
+        for col in ("total_shares", "float_shares", "total_cap", "float_cap"):
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        # 全量替换：每次更新是当前时刻的快照
+        try:
+            self.db.execute("DELETE FROM stock_info")
+            df["updated_at"] = pd.Timestamp.now()
+            rows = self.db.save_dataframe(df, "stock_info")
+            logger.info(f"股票基本信息更新完成: {rows} 只")
+            return rows
+        except Exception as e:
+            logger.error(f"写入股票基本信息失败: {e}")
+            return 0
+
     # ------------------------------------------------------------------
     # 内部：日期决策
     # ------------------------------------------------------------------
@@ -389,94 +431,50 @@ class DataUpdater:
         """批量拉取 & 入库（生产者-消费者模型，抓取并发 + 写入串行）。"""
         adjust = adjust or self.cfg.get("data_fetch.adjust", "hfq")
         end_date = ensure_date(end_date) or dt.date.today()
+        codes = [normalize_stock_code(c) for c in codes]
 
-        total = len(codes)
         results: dict[str, int] = {}
         failed: list[str] = []
-        t_start = time.time()
 
         fetch_timeout = int(self.cfg.get("data_fetch.timeout", 30))
-        max_workers = int(self.cfg.get("data_fetch.max_workers", 5))
+        max_workers = int(self.cfg.get("data_fetch.max_workers", 16))
         q_maxsize = int(self.cfg.get("data_fetch.queue_maxsize", 200))
 
-        write_q: queue.Queue[
-            tuple[str, pd.DataFrame | None, Exception | None] | None
-        ] = queue.Queue(maxsize=q_maxsize)
-        lock = threading.Lock()
-        processed = 0
+        def _fetch(code: str) -> pd.DataFrame:
+            sd = self._resolve_start_date(code, start_date)
+            if sd > end_date:
+                return pd.DataFrame()
+            return self._source.get_daily_bars(code, sd, end_date, adjust)
 
-        # ---- 写入线程 ----
-        def _writer() -> None:
-            nonlocal processed
-            while True:
-                item = write_q.get()
-                if item is None:
-                    write_q.task_done()
-                    break
-                w_code, df, err = item
-                try:
-                    if err is not None:
-                        with lock:
-                            failed.append(w_code)
-                        logger.warning(f"{w_code} 拉取出错: {err}")
-                    elif df is None or df.empty:
-                        with lock:
-                            results[w_code] = 0
-                    else:
-                        df = self.cleaner.clean_pipeline(df)
-                        rows = self.db.save_dataframe(df, "daily_bars")
-                        with lock:
-                            results[w_code] = rows
-                except Exception as e:
-                    with lock:
-                        failed.append(w_code)
-                    logger.warning(f"{w_code} 写入失败: {e}")
-                finally:
-                    with lock:
-                        processed += 1
-                        cur = processed
-                    write_q.task_done()
-                    if cur % 100 == 0 or cur == total:
-                        elapsed = time.time() - t_start
-                        speed = cur / elapsed if elapsed > 0 else 0
-                        logger.info(
-                            f"[{cur}/{total}] 成功 {len(results)} | "
-                            f"失败 {len(failed)} | {speed:.1f} 只/s"
-                        )
-
-        writer_t = threading.Thread(target=_writer, daemon=True)
-        writer_t.start()
-
-        # ---- 抓取 ----
-        def _fetch_one(code: str) -> None:
-            code = normalize_stock_code(code)
+        def _consume(
+            code: str, df: pd.DataFrame | None, err: Exception | None,
+        ) -> None:
+            if err is not None:
+                failed.append(code)
+                logger.warning(f"{code} 拉取出错: {err}")
+                return
+            if df is None or df.empty:
+                results[code] = 0
+                return
             try:
-                sd = self._resolve_start_date(code, start_date)
-                if sd > end_date:
-                    write_q.put((code, pd.DataFrame(), None))
-                    return
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _ex:
-                    fut = _ex.submit(
-                        self._source.get_daily_bars, code, sd, end_date, adjust,
-                    )
-                    try:
-                        df = fut.result(timeout=fetch_timeout)
-                    except concurrent.futures.TimeoutError:
-                        fut.cancel()
-                        raise TimeoutError(f"拉取 {code} 超时 ({fetch_timeout}s)")
-                write_q.put((code, df, None))
+                df = self.cleaner.clean_pipeline(df)
+                rows = self.db.save_dataframe(df, "daily_bars")
+                results[code] = rows
             except Exception as e:
-                write_q.put((code, None, e))
+                failed.append(code)
+                logger.warning(f"{code} 写入失败: {e}")
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
-            futures = [pool.submit(_fetch_one, c) for c in codes]
-            concurrent.futures.wait(futures)
+        total, elapsed = parallel_fetch_serial_consume(
+            items=codes,
+            fetch_fn=_fetch,
+            consume_fn=_consume,
+            max_workers=max_workers,
+            queue_maxsize=q_maxsize,
+            fetch_timeout=fetch_timeout,
+            progress_interval=100,
+            label="日线更新",
+        )
 
-        write_q.join()
-        write_q.put(None)
-        writer_t.join()
-
-        elapsed = time.time() - t_start
         logger.info(
             f"批量更新完成: 共 {total} 只, 成功 {len(results)}, "
             f"失败 {len(failed)}, 耗时 {elapsed:.1f}s"
@@ -497,6 +495,7 @@ def main() -> None:
         epilog="""\
 示例:
   %(prog)s                                # 更新全部 A 股日线 (默认)
+  %(prog)s --mode stock_info              # 更新股票基本信息（行业/市值）
   %(prog)s --mode benchmark               # 更新 Benchmark 指数行情
   %(prog)s --mode index --index-code 000300
   %(prog)s --mode codes --codes 000001 600519
@@ -505,7 +504,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--mode",
-        choices=("all", "benchmark", "index", "codes"),
+        choices=("all", "stock_info", "benchmark", "index", "codes"),
         default="all",
         help="更新模式 (默认: all)",
     )
@@ -557,6 +556,10 @@ def main() -> None:
                 include_bse=args.include_bse,
                 include_gem=args.include_gem,
             )
+        elif args.mode == "stock_info":
+            rows = updater.update_stock_info()
+            print(f"股票基本信息更新完成: {rows} 只")
+            return
         elif args.mode == "benchmark":
             bm_codes = args.codes if args.codes else None
             res = updater.update_benchmark_indices(

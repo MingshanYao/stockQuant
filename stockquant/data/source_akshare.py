@@ -11,6 +11,7 @@ import akshare as ak
 import pandas as pd
 
 from stockquant.data.data_source import BaseDataSource, DataSourceFactory
+from stockquant.utils.concurrent import parallel_fetch_serial_consume
 from stockquant.utils.helpers import normalize_stock_code, get_market_prefix, ensure_date
 from stockquant.utils.logger import get_logger
 
@@ -139,6 +140,139 @@ class AkShareDataSource(BaseDataSource):
         except Exception as e:
             logger.error(f"获取交易日历失败: {e}")
             return []
+
+    # ------------------------------------------------------------------
+    # 股票基本信息（行业/市值等）
+    # ------------------------------------------------------------------
+    def get_stock_info(self) -> pd.DataFrame:
+        """获取全市场股票基本信息（代码/名称/行业/市值等）。
+
+        数据源:
+        - ``stock_zh_a_spot_em``  — 全市场实时行情快照，提供市值/股本
+        - ``stock_board_industry_name_em`` + ``stock_board_industry_cons_em``
+          — 行业板块成分股，用于反查每只股票所属行业
+
+        Returns
+        -------
+        DataFrame
+            标准列: code, name, industry, sector, market,
+            list_date, total_shares, float_shares, total_cap, float_cap
+        """
+        logger.info("通过 AkShare 获取全市场股票基本信息")
+
+        # ---- 1. 全市场实时快照 ----
+        try:
+            spot = ak.stock_zh_a_spot_em()
+        except Exception as e:
+            logger.error(f"获取全市场实时行情失败: {e}")
+            return pd.DataFrame()
+
+        df = pd.DataFrame()
+        df["code"] = spot["代码"].astype(str).str.zfill(6)
+        df["name"] = spot["名称"]
+        df["total_cap"] = pd.to_numeric(spot.get("总市值"), errors="coerce")
+        df["float_cap"] = pd.to_numeric(spot.get("流通市值"), errors="coerce")
+
+        # ---- 2. 推断 market ----
+        df["market"] = df["code"].apply(self._infer_market)
+
+        # ---- 3. 行业映射 ----
+        industry_map = self._get_industry_map()
+        df["industry"] = df["code"].map(industry_map)
+
+        # sector 暂用 market 字段（后续可扩展为申万一级行业）
+        df["sector"] = df["market"]
+
+        # 当前实时快照不包含股本/上市日期，留空后续可补充
+        for col in ("list_date", "total_shares", "float_shares"):
+            if col not in df.columns:
+                df[col] = None
+
+        # ---- 4. 列顺序 ----
+        standard_cols = [
+            "code", "name", "industry", "sector", "market",
+            "list_date", "total_shares", "float_shares",
+            "total_cap", "float_cap",
+        ]
+        df = df[[c for c in standard_cols if c in df.columns]]
+        logger.info(f"获取股票基本信息完成: {len(df)} 只")
+        return df
+
+    @staticmethod
+    def _infer_market(code: str) -> str:
+        """根据代码前缀推断所属市场。"""
+        if code.startswith("688"):
+            return "科创板"
+        if code.startswith("30"):
+            return "创业板"
+        if code.startswith("60"):
+            return "沪市主板"
+        if code.startswith("00"):
+            return "深市主板"
+        if code.startswith(("4", "8")):
+            return "北交所"
+        return "其他"
+
+    @staticmethod
+    def _get_industry_map() -> dict[str, str]:
+        """构建 {股票代码: 行业名称} 映射表。
+
+        遍历东方财富行业板块列表，并发拉取成分股，建立反向映射。
+        跳过重名板块（如 Ⅱ/Ⅲ 同名的保留第一个）。
+        """
+        logger.info("构建行业映射表（stock_board_industry）")
+        code_to_industry: dict[str, str] = {}
+
+        try:
+            boards = ak.stock_board_industry_name_em()
+        except Exception as e:
+            logger.error(f"获取行业板块列表失败: {e}")
+            return code_to_industry
+
+        # 过滤重复板块（Ⅱ/Ⅲ 后缀视为同一行业，保留一个即可）
+        seen_names: set[str] = set()
+        unique_boards: list[str] = []
+        for _, row in boards.iterrows():
+            name = row["板块名称"]
+            base_name = name.rstrip("ⅡⅢⅣ").strip()
+            if base_name not in seen_names:
+                seen_names.add(base_name)
+                unique_boards.append(name)
+
+        logger.info(f"共 {len(unique_boards)} 个行业板块需要遍历")
+
+        def _fetch(board_name: str) -> pd.DataFrame:
+            return ak.stock_board_industry_cons_em(symbol=board_name)
+
+        def _consume(
+            board_name: str,
+            df: pd.DataFrame | None,
+            err: Exception | None,
+        ) -> None:
+            if err is not None:
+                logger.debug(f"获取板块 {board_name} 成分股失败: {err}")
+                return
+            if df is None or df.empty:
+                return
+            clean_name = board_name.rstrip("ⅡⅢⅣ").strip()
+            for code in df["代码"].astype(str).str.zfill(6):
+                if code not in code_to_industry:
+                    code_to_industry[code] = clean_name
+
+        _, elapsed = parallel_fetch_serial_consume(
+            items=unique_boards,
+            fetch_fn=_fetch,
+            consume_fn=_consume,
+            max_workers=16,
+            progress_interval=50,
+            label="行业映射",
+        )
+
+        logger.info(
+            f"行业映射构建完成: {len(code_to_industry)} 只股票, "
+            f"耗时 {elapsed:.1f}s"
+        )
+        return code_to_industry
 
     # ------------------------------------------------------------------
     # 内部：列名标准化

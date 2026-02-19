@@ -150,6 +150,12 @@ class BaoStockDataSource(BaseDataSource):
         return df
 
     # ------------------------------------------------------------------
+    def get_stock_info(self) -> pd.DataFrame:
+        """BaoStock 暂不支持批量获取股票基本信息，返回空 DataFrame。"""
+        logger.warning("BaoStock 数据源不支持 get_stock_info，请使用 AkShare")
+        return pd.DataFrame()
+
+    # ------------------------------------------------------------------
     def get_trade_dates(
         self,
         start_date: str | dt.date,

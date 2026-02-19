@@ -68,6 +68,17 @@ class BaseDataSource(ABC):
         """获取基本财务数据。"""
 
     @abstractmethod
+    def get_stock_info(self) -> pd.DataFrame:
+        """获取全市场股票基本信息。
+
+        Returns
+        -------
+        DataFrame
+            标准列: code, name, industry, sector, market,
+            list_date, total_shares, float_shares, total_cap, float_cap
+        """
+
+    @abstractmethod
     def get_trade_dates(
         self,
         start_date: str | dt.date,
