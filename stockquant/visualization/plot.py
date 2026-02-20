@@ -121,6 +121,90 @@ class PlotEngine:
     # 3. K线 + 买卖点
     # ------------------------------------------------------------------
 
+    def build_kline_traces(
+        self,
+        df: pd.DataFrame,
+        trades: pd.DataFrame | None = None,
+        name: str = "",
+    ) -> list:
+        """构建 K 线 + 成交量的 Plotly traces 列表（不显示，用于组合子图）。
+
+        Parameters
+        ----------
+        df : DataFrame
+            OHLCV 数据，需包含 date/open/high/low/close 列，可选 volume。
+        trades : DataFrame, optional
+            买卖点，需包含 date, price, direction 列。
+        name : str
+            K 线名称前缀（用于图例）。
+
+        Returns
+        -------
+        list[tuple[go.BaseTraceType, str]]
+            每个元素为 ``(trace, target_row)``，target_row 为
+            ``"candle"`` 或 ``"volume"``，方便调用方添加到对应子图行。
+        """
+        if not HAS_PLOTLY:
+            logger.warning("K线图需要 plotly，请安装: pip install plotly")
+            return []
+
+        traces: list[tuple] = []
+        x = df["date"] if "date" in df.columns else df.index
+
+        # K 线
+        traces.append((
+            go.Candlestick(
+                x=x, open=df["open"], high=df["high"],
+                low=df["low"], close=df["close"],
+                name=f"{name} K线" if name else "K线",
+                increasing_line_color="red",
+                decreasing_line_color="green",
+                showlegend=bool(name),
+            ),
+            "candle",
+        ))
+
+        # 成交量
+        if "volume" in df.columns:
+            colors = [
+                "red" if c >= o else "green"
+                for c, o in zip(df["close"], df["open"])
+            ]
+            traces.append((
+                go.Bar(
+                    x=x, y=df["volume"],
+                    name="成交量",
+                    marker_color=colors, opacity=0.5,
+                    showlegend=False,
+                ),
+                "volume",
+            ))
+
+        # 买卖点
+        if trades is not None and not trades.empty:
+            buys = trades[trades["direction"] == "buy"]
+            sells = trades[trades["direction"] == "sell"]
+            if not buys.empty:
+                traces.append((
+                    go.Scatter(
+                        x=buys["date"], y=buys["price"],
+                        mode="markers", name="买入",
+                        marker=dict(symbol="triangle-up", size=10, color="magenta"),
+                    ),
+                    "candle",
+                ))
+            if not sells.empty:
+                traces.append((
+                    go.Scatter(
+                        x=sells["date"], y=sells["price"],
+                        mode="markers", name="卖出",
+                        marker=dict(symbol="triangle-down", size=10, color="blue"),
+                    ),
+                    "candle",
+                ))
+
+        return traces
+
     def plot_kline(
         self,
         df: pd.DataFrame,
@@ -139,35 +223,9 @@ class PlotEngine:
             row_heights=[0.7, 0.3],
         )
 
-        fig.add_trace(go.Candlestick(
-            x=df["date"], open=df["open"], high=df["high"],
-            low=df["low"], close=df["close"], name="K线",
-        ), row=1, col=1)
-
-        if "volume" in df.columns:
-            colors = ["red" if c >= o else "green" for c, o in zip(df["close"], df["open"])]
-            fig.add_trace(go.Bar(
-                x=df["date"], y=df["volume"], name="成交量",
-                marker_color=colors, opacity=0.5,
-            ), row=2, col=1)
-
-        if trades is not None and not trades.empty:
-            buys = trades[trades["direction"] == "buy"]
-            sells = trades[trades["direction"] == "sell"]
-
-            if not buys.empty:
-                fig.add_trace(go.Scatter(
-                    x=buys["date"], y=buys["price"],
-                    mode="markers", name="买入",
-                    marker=dict(symbol="triangle-up", size=10, color="magenta"),
-                ), row=1, col=1)
-
-            if not sells.empty:
-                fig.add_trace(go.Scatter(
-                    x=sells["date"], y=sells["price"],
-                    mode="markers", name="卖出",
-                    marker=dict(symbol="triangle-down", size=10, color="blue"),
-                ), row=1, col=1)
+        for trace, target in self.build_kline_traces(df, trades):
+            row = 1 if target == "candle" else 2
+            fig.add_trace(trace, row=row, col=1)
 
         fig.update_layout(title=title, xaxis_rangeslider_visible=False)
         if save_path:
