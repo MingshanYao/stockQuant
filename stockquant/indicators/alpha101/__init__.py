@@ -30,6 +30,7 @@ Kakushadze (2016) 论文的全部 101 个 Alpha 因子公式。
 from stockquant.indicators.alpha101.alpha101 import (
     Alpha101Engine,
     Alpha101Indicators,
+    CAP_ALPHAS,
     INDUSTRY_ALPHAS,
 )
 from stockquant.indicators.alpha101.operators import (
@@ -61,6 +62,7 @@ __all__ = [
     "Alpha101Indicators",
     "Alpha101Engine",
     "INDUSTRY_ALPHAS",
+    "CAP_ALPHAS",
     # 算子
     "rank",
     "scale",

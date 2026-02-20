@@ -62,6 +62,29 @@ class DataManager:
                 return df
         return self.update_stock_list()
 
+    def get_stock_info(self, codes: Sequence[str] | None = None) -> pd.DataFrame:
+        """获取股票基本信息（行业 / 市值等）。
+
+        Parameters
+        ----------
+        codes : list[str], optional
+            股票代码列表。若为 None 则返回全部。
+
+        Returns
+        -------
+        DataFrame
+            包含 code, name, industry, sector, market,
+            total_cap, float_cap 等列。
+        """
+        if not self.db.table_exists("stock_info"):
+            self.update_stock_list()
+
+        sql = "SELECT * FROM stock_info"
+        if codes:
+            placeholders = ", ".join(f"'{c}'" for c in codes)
+            sql += f" WHERE code IN ({placeholders})"
+        return self.db.query(sql)
+
     # ------------------------------------------------------------------
     # 日线数据
     # ------------------------------------------------------------------

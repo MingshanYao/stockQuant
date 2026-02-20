@@ -24,9 +24,10 @@ Notes
 -----
 - VWAP 优先使用用户传入的值；其次通过 ``amount / volume``
   （成交额 / 成交量）自动计算；最终 fallback 到 ``(high + low + close) / 3``。
-- 涉及行业中性化 (IndNeutralize) 的因子在 ``industry`` 参数缺失时
-  自动跳过中性化步骤。
-- 涉及市值 (cap) 的因子在 ``cap`` 参数缺失时用 ``close`` 价格近似。
+- 涉及行业中性化 (IndNeutralize) 和市值 (cap) 的因子，当 ``industry`` / ``cap``
+  参数缺失时，默认自动从本地 ``stock_info`` 数据库表加载（通过列名匹配股票代码）。
+  若数据库也无数据，则行业中性化跳过，市值用 ``close`` 近似。
+  可通过 ``auto_load_info=False`` 禁用自动加载。
 - 论文中部分窗口参数为浮点数，实现时取整为 ``int``。
 """
 
@@ -69,6 +70,9 @@ logger = get_logger("indicators.alpha101")
 INDUSTRY_ALPHAS: set[int] = {
     48, 58, 59, 63, 67, 69, 70, 76, 79, 80, 82, 87, 89, 90, 91, 93, 97, 100,
 }
+
+# 需要市值数据的 Alpha 编号
+CAP_ALPHAS: set[int] = {56}
 
 
 class Alpha101Indicators(BaseIndicator):
@@ -153,6 +157,7 @@ class Alpha101Indicators(BaseIndicator):
         returns: pd.DataFrame | None = None,
         cap: pd.DataFrame | None = None,
         industry: pd.DataFrame | None = None,
+        auto_load_info: bool = True,
     ) -> "Alpha101Engine":
         """创建面板计算引擎（多股票截面计算）。
 
@@ -169,9 +174,11 @@ class Alpha101Indicators(BaseIndicator):
         returns : DataFrame, optional
             收益率。默认用 ``close.pct_change()``。
         cap : DataFrame, optional
-            流通市值（Alpha#56 需要）。
+            流通市值（Alpha#56 需要）。缺失时自动从 stock_info 表加载。
         industry : DataFrame, optional
-            行业分类代码（IndNeutralize 需要）。
+            行业分类代码（IndNeutralize 需要）。缺失时自动从 stock_info 表加载。
+        auto_load_info : bool, default True
+            当 ``industry`` / ``cap`` 缺失时，是否自动从本地 stock_info 表加载。
 
         Returns
         -------
@@ -181,7 +188,7 @@ class Alpha101Indicators(BaseIndicator):
         return Alpha101Engine(
             open_=open_, high=high, low=low, close=close,
             volume=volume, vwap=vwap, amount=amount, returns=returns,
-            cap=cap, industry=industry,
+            cap=cap, industry=industry, auto_load_info=auto_load_info,
         )
 
     @classmethod
@@ -190,6 +197,7 @@ class Alpha101Indicators(BaseIndicator):
         df: pd.DataFrame,
         date_col: str = "date",
         code_col: str = "code",
+        auto_load_info: bool = True,
     ) -> "Alpha101Engine":
         """从堆叠格式 DataFrame 创建面板计算引擎。
 
@@ -197,6 +205,8 @@ class Alpha101Indicators(BaseIndicator):
         ----------
         df : DataFrame
             长格式，至少包含 date, code, open, high, low, close, volume 列。
+        auto_load_info : bool, default True
+            当 ``industry`` / ``cap`` 缺失时，是否自动从本地 stock_info 表加载。
         """
         df = df.copy()
         if not isinstance(df.index, pd.MultiIndex):
@@ -218,6 +228,7 @@ class Alpha101Indicators(BaseIndicator):
             returns=_pivot("returns"),
             cap=_pivot("cap"),
             industry=_pivot("industry"),
+            auto_load_info=auto_load_info,
         )
 
     # ------------------------------------------------------------------
@@ -227,25 +238,30 @@ class Alpha101Indicators(BaseIndicator):
     @staticmethod
     def _build_engine_from_single(df: pd.DataFrame) -> "Alpha101Engine":
         """从单只股票 DataFrame 构建面板引擎（列退化为 1）。"""
-        code = "_stock"
+        code = df.get("code", pd.Series(["_stock"])).iloc[0] if "code" in df.columns else "_stock"
+
+        def _col(col_name: str) -> pd.DataFrame | None:
+            if col_name in df.columns:
+                return df[[col_name]].rename(columns={col_name: code})
+            return None
+
+        # industry 为分类字段，需要特殊处理
+        industry_panel = None
+        if "industry" in df.columns:
+            industry_panel = df[["industry"]].rename(columns={"industry": code})
+
         return Alpha101Engine(
             open_=df[["open"]].rename(columns={"open": code}),
             high=df[["high"]].rename(columns={"high": code}),
             low=df[["low"]].rename(columns={"low": code}),
             close=df[["close"]].rename(columns={"close": code}),
             volume=df[["volume"]].rename(columns={"volume": code}),
-            vwap=(
-                df[["vwap"]].rename(columns={"vwap": code})
-                if "vwap" in df.columns else None
-            ),
-            amount=(
-                df[["amount"]].rename(columns={"amount": code})
-                if "amount" in df.columns else None
-            ),
-            returns=(
-                df[["returns"]].rename(columns={"returns": code})
-                if "returns" in df.columns else None
-            ),
+            vwap=_col("vwap"),
+            amount=_col("amount"),
+            returns=_col("returns"),
+            cap=_col("cap"),
+            industry=industry_panel,
+            auto_load_info=(code != "_stock"),  # 有真实代码时尝试自动加载
         )
 
 
@@ -273,6 +289,7 @@ class Alpha101Engine:
         returns: pd.DataFrame | None = None,
         cap: pd.DataFrame | None = None,
         industry: pd.DataFrame | None = None,
+        auto_load_info: bool = True,
     ) -> None:
         self.open = open_
         self.high = high
@@ -291,9 +308,88 @@ class Alpha101Engine:
         self.industry = industry
         self._cache: dict[str, Any] = {}
 
+        # 自动从 stock_info 表加载行业 / 市值
+        if auto_load_info and (self.industry is None or self.cap is None):
+            self._auto_load_stock_info()
+
     # ==================================================================
     # 内部工具
     # ==================================================================
+
+    def _auto_load_stock_info(self) -> None:
+        """从本地 stock_info 表自动加载行业和流通市值，填充缺失的 industry / cap。"""
+        codes = list(self.close.columns)
+        try:
+            from stockquant.data.database import Database
+
+            db = Database(read_only=True)
+            if not db.table_exists("stock_info"):
+                return
+
+            placeholders = ", ".join(f"'{c}'" for c in codes)
+            info_df = db.query(
+                f"SELECT code, industry, float_cap FROM stock_info "
+                f"WHERE code IN ({placeholders})"
+            )
+            db.close()
+
+            if info_df.empty:
+                return
+
+            ind_map = dict(zip(info_df["code"], info_df["industry"]))
+            cap_map = dict(zip(info_df["code"], info_df["float_cap"]))
+
+            if self.industry is None and any(
+                pd.notna(v) for v in ind_map.values()
+            ):
+                self.industry = self._expand_static_to_panel(
+                    ind_map, self.close.index, self.close.columns,
+                )
+                logger.info(
+                    f"已从 stock_info 加载行业数据: "
+                    f"{self.industry.iloc[0].dropna().nunique()} 个行业"
+                )
+
+            if self.cap is None and any(
+                pd.notna(v) for v in cap_map.values()
+            ):
+                self.cap = self._expand_static_to_panel(
+                    cap_map, self.close.index, self.close.columns,
+                    dtype=float,
+                )
+                logger.info("已从 stock_info 加载流通市值数据")
+
+        except Exception as e:
+            logger.debug(f"自动加载 stock_info 失败（不影响计算）: {e}")
+
+    @staticmethod
+    def _expand_static_to_panel(
+        mapping: dict[str, Any],
+        index: pd.Index,
+        columns: pd.Index,
+        dtype: type | None = None,
+    ) -> pd.DataFrame:
+        """将静态映射 (code → value) 扩展为面板 DataFrame (dates × codes)。
+
+        Parameters
+        ----------
+        mapping : dict
+            股票代码 → 值（行业代码或市值）。
+        index : Index
+            日期索引。
+        columns : Index
+            股票代码索引。
+        dtype : type, optional
+            强制数据类型，如 ``float``。
+        """
+        values = pd.Series(mapping).reindex(columns)
+        if dtype is not None:
+            values = values.astype(dtype)
+        return pd.DataFrame(
+            np.tile(values.values, (len(index), 1)),
+            index=index,
+            columns=columns,
+        )
 
     def _adv(self, d: int) -> pd.DataFrame:
         """带缓存的平均日成交量。"""

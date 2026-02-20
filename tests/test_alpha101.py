@@ -17,7 +17,7 @@ import pandas as pd
 import pytest
 
 from stockquant.indicators import Alpha101Indicators, BaseIndicator
-from stockquant.indicators.alpha101 import Alpha101Engine, INDUSTRY_ALPHAS
+from stockquant.indicators.alpha101 import Alpha101Engine, INDUSTRY_ALPHAS, CAP_ALPHAS
 from stockquant.indicators.alpha101.operators import (
     rank,
     scale,
@@ -346,3 +346,103 @@ class TestFactory:
         assert "alpha041" in result.columns
         assert "alpha101" in result.columns
         assert result.shape[0] == single_stock_df.shape[0]
+
+
+# ------------------------------------------------------------------
+# 自动加载 stock_info 测试
+# ------------------------------------------------------------------
+
+class TestAutoLoadStockInfo:
+    """测试从 stock_info 表自动加载 industry / cap 数据。"""
+
+    def test_cap_alphas_constant(self):
+        assert 56 in CAP_ALPHAS
+
+    def test_expand_static_to_panel(self, panel_data):
+        """_expand_static_to_panel 应将静态映射扩展为面板。"""
+        _, _, _, close, _ = panel_data
+        mapping = {"A": "tech", "B": "finance", "C": "tech", "D": "health", "E": "finance"}
+        result = Alpha101Engine._expand_static_to_panel(
+            mapping, close.index, close.columns,
+        )
+        assert result.shape == close.shape
+        # 每列值应一致（静态数据在所有日期相同）
+        for code in close.columns:
+            assert result[code].nunique() == 1
+            assert result[code].iloc[0] == mapping[code]
+
+    def test_expand_static_to_panel_float(self, panel_data):
+        """_expand_static_to_panel 支持 float 类型。"""
+        _, _, _, close, _ = panel_data
+        mapping = {"A": 1e10, "B": 2e10, "C": 1.5e10, "D": 3e10, "E": 5e9}
+        result = Alpha101Engine._expand_static_to_panel(
+            mapping, close.index, close.columns, dtype=float,
+        )
+        assert result.shape == close.shape
+        assert result.dtypes.unique()[0] == np.float64
+
+    def test_auto_load_disabled(self, panel_data):
+        """auto_load_info=False 时不应加载 stock_info。"""
+        open_, high, low, close, volume = panel_data
+        engine = Alpha101Indicators.panel(
+            open_=open_, high=high, low=low, close=close, volume=volume,
+            auto_load_info=False,
+        )
+        # industry / cap 应为 None（测试环境无真实数据库）
+        assert engine.industry is None
+        assert engine.cap is None
+
+    def test_panel_with_explicit_industry_and_cap(self, panel_data):
+        """显式传入 industry 和 cap 时，不应被覆盖。"""
+        open_, high, low, close, volume = panel_data
+        codes = close.columns.tolist()
+        dates = close.index
+
+        # 构建 industry 面板
+        ind_map = {c: f"ind_{i}" for i, c in enumerate(codes)}
+        industry = Alpha101Engine._expand_static_to_panel(
+            ind_map, dates, close.columns,
+        )
+        # 构建 cap 面板
+        cap_map = {c: float(i + 1) * 1e10 for i, c in enumerate(codes)}
+        cap = Alpha101Engine._expand_static_to_panel(
+            cap_map, dates, close.columns, dtype=float,
+        )
+
+        engine = Alpha101Indicators.panel(
+            open_=open_, high=high, low=low, close=close, volume=volume,
+            industry=industry, cap=cap, auto_load_info=False,
+        )
+        assert engine.industry is not None
+        assert engine.cap is not None
+        # alpha056 应使用传入的 cap
+        result = engine.alpha056()
+        assert not result.empty
+        assert result.shape == close.shape
+
+    def test_industry_alphas_with_industry_data(self, panel_data):
+        """提供行业数据后，INDUSTRY_ALPHAS 因子应可正常计算。"""
+        open_, high, low, close, volume = panel_data
+        codes = close.columns.tolist()
+        dates = close.index
+        ind_map = {c: f"ind_{i % 3}" for i, c in enumerate(codes)}
+        industry = Alpha101Engine._expand_static_to_panel(
+            ind_map, dates, close.columns,
+        )
+
+        engine = Alpha101Indicators.panel(
+            open_=open_, high=high, low=low, close=close, volume=volume,
+            industry=industry, auto_load_info=False,
+        )
+        # 测试几个需要行业数据的因子
+        for alpha_id in [48, 58, 59]:
+            result = engine.compute_factor(alpha_id)
+            assert result.shape == close.shape, f"Alpha#{alpha_id} shape mismatch"
+
+    def test_from_stacked_df_auto_load(self, stacked_df):
+        """from_stacked_df 支持 auto_load_info 参数。"""
+        engine = Alpha101Indicators.from_stacked_df(
+            stacked_df, auto_load_info=False,
+        )
+        assert engine.industry is None
+        assert engine.cap is None
