@@ -178,7 +178,7 @@ class AkShareDataSource(BaseDataSource):
 
         # ---- 3. 行业映射 ----
         industry_map = self._get_industry_map()
-        df["industry"] = df["code"].map(industry_map)
+        df["industry"] = df["code"].map(industry_map).fillna("其他")
 
         # sector 暂用 market 字段（后续可扩展为申万一级行业）
         df["sector"] = df["market"]
