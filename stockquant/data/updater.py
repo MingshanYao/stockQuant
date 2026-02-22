@@ -437,7 +437,7 @@ class DataUpdater:
         failed: list[str] = []
 
         fetch_timeout = int(self.cfg.get("data_fetch.timeout", 30))
-        max_workers = int(self.cfg.get("data_fetch.max_workers", 16))
+        max_workers = int(self.cfg.get("data_fetch.max_workers", 32))
         q_maxsize = int(self.cfg.get("data_fetch.queue_maxsize", 200))
 
         def _fetch(code: str) -> pd.DataFrame:

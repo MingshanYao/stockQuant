@@ -124,6 +124,98 @@ class DataCleaner:
         return df
 
     # ------------------------------------------------------------------
+    # 数据质量过滤
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def drop_invalid_stocks(df: pd.DataFrame) -> pd.DataFrame:
+        """剔除含异常数据的股票（以 code 为粒度，整支股票删除）。
+
+        异常规则:
+        - 任意价格列 (open / high / low / close) <= 0 或 NaN
+        - volume < 0 或 NaN
+        - amount < 0 或 NaN
+
+        若 DataFrame 中不含 ``code`` 列，则直接删除异常行。
+
+        Returns
+        -------
+        DataFrame
+            已剔除异常股票后的干净数据。
+        """
+        if df.empty:
+            return df
+
+        df = df.copy()
+
+        # 构建各规则的异常 mask
+        invalid_mask = pd.Series(False, index=df.index)
+
+        price_cols = [c for c in ("open", "high", "low", "close") if c in df.columns]
+        for col in price_cols:
+            s = pd.to_numeric(df[col], errors="coerce")
+            bad = s.le(0) | s.isna()
+            if bad.any():
+                invalid_mask |= bad
+
+        if "volume" in df.columns:
+            s = pd.to_numeric(df["volume"], errors="coerce")
+            bad = s.lt(0) | s.isna()
+            if bad.any():
+                invalid_mask |= bad
+
+        if "amount" in df.columns:
+            s = pd.to_numeric(df["amount"], errors="coerce")
+            bad = s.lt(0) | s.isna()
+            if bad.any():
+                invalid_mask |= bad
+
+        if not invalid_mask.any():
+            return df
+
+        # 有 code 列时以股票为粒度整体剔除
+        if "code" in df.columns:
+            bad_codes = df.loc[invalid_mask, "code"].unique().tolist()
+            # 逐只记录异常原因
+            for code in bad_codes:
+                code_mask = df["code"] == code
+                reasons: list[str] = []
+                for col in price_cols:
+                    s = pd.to_numeric(df.loc[code_mask, col], errors="coerce")
+                    n_le0 = int(s.le(0).sum())
+                    n_nan = int(s.isna().sum())
+                    if n_le0:
+                        reasons.append(f"{col}<=0 ({n_le0}行)")
+                    if n_nan:
+                        reasons.append(f"{col}=NaN ({n_nan}行)")
+                if "volume" in df.columns:
+                    s = pd.to_numeric(df.loc[code_mask, "volume"], errors="coerce")
+                    n_lt0, n_nan = int(s.lt(0).sum()), int(s.isna().sum())
+                    if n_lt0:
+                        reasons.append(f"volume<0 ({n_lt0}行)")
+                    if n_nan:
+                        reasons.append(f"volume=NaN ({n_nan}行)")
+                if "amount" in df.columns:
+                    s = pd.to_numeric(df.loc[code_mask, "amount"], errors="coerce")
+                    n_lt0, n_nan = int(s.lt(0).sum()), int(s.isna().sum())
+                    if n_lt0:
+                        reasons.append(f"amount<0 ({n_lt0}行)")
+                    if n_nan:
+                        reasons.append(f"amount=NaN ({n_nan}行)")
+                logger.warning(
+                    f"[{code}] 数据异常，整支股票已剔除: {', '.join(reasons)}"
+                )
+            df = df[~df["code"].isin(bad_codes)].copy()
+            logger.info(f"共剔除 {len(bad_codes)} 只异常股票: {bad_codes[:20]}{'...' if len(bad_codes) > 20 else ''}")
+        else:
+            # 无 code 列时直接删行
+            n = int(invalid_mask.sum())
+            logger.warning(f"无 code 列，直接剔除 {n} 条异常行")
+            df = df[~invalid_mask].copy()
+
+        return df
+
+    # ------------------------------------------------------------------
     # 管道处理
     # ------------------------------------------------------------------
 
@@ -135,6 +227,7 @@ class DataCleaner:
         remove_suspended: bool = True,
     ) -> pd.DataFrame:
         """执行标准清洗管道。"""
+        df = cls.drop_invalid_stocks(df)   # 先剔除异常股票，再做后续处理
         df = cls.standardize_columns(df)
         df = cls.fill_missing(df, method=fill_method)
         if remove_suspended:

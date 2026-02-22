@@ -24,7 +24,6 @@
 └── README.md
 ```
 
-
 ## 🧩 功能模块
 
 ### 1. 数据采集与管理
@@ -54,6 +53,7 @@
 ```
 python3 -m updater --mode all --start-date 2015-01-01 --end-date 2025-12-31
 python3 -m updater --mode benchmark --start-date 2015-01-01 --end-date 2025-12-31
+python3 -m updater --mode stock_info
 ```
 
 ### 2. 技术指标计算
@@ -89,6 +89,7 @@ python3 -m updater --mode benchmark --start-date 2015-01-01 --end-date 2025-12-3
 基于 Kakushadze (2016) *"101 Formulaic Alphas"* 论文，完整实现全部 101 个量价因子公式。
 
 **核心特性：**
+
 - 📊 **全量实现** — 101 个 Alpha 因子全覆盖
 - 🚀 **向量化运算** — 基于 Pandas/NumPy，支持全市场截面计算
 - 🏭 **面板数据** — 行=日期, 列=股票代码，天然支持多股票并行
@@ -96,6 +97,7 @@ python3 -m updater --mode benchmark --start-date 2015-01-01 --end-date 2025-12-3
 - 🏢 **行业中性化** — 可选传入行业分类数据启用 IndNeutralize
 
 **快速使用：**
+
 ```python
 from stockquant.indicators import Alpha101Indicators
 

@@ -9,6 +9,7 @@ from typing import Any
 
 import akshare as ak
 import pandas as pd
+import numpy as np
 
 from stockquant.data.data_source import BaseDataSource, DataSourceFactory
 from stockquant.utils.concurrent import parallel_fetch_serial_consume
@@ -50,8 +51,28 @@ class AkShareDataSource(BaseDataSource):
         adjust_map = {"qfq": "qfq", "hfq": "hfq", "none": ""}
         ak_adjust = adjust_map.get(adjust, "hfq")
 
+        # 如果不需要复权，直接请求一次并返回
         try:
-            df = ak.stock_zh_a_hist(
+            if ak_adjust == "":
+                raw = ak.stock_zh_a_hist(
+                    symbol=code,
+                    period="daily",
+                    start_date=start_str,
+                    end_date=end_str,
+                )
+                if raw is None or raw.empty:
+                    return pd.DataFrame()
+                return self._standardize_daily(raw, code)
+
+            # 需要复权时，同时拉取未复权与复权数据，计算复权因子以调整成交量
+            raw = ak.stock_zh_a_hist(
+                symbol=code,
+                period="daily",
+                start_date=start_str,
+                end_date=end_str,
+                adjust="",
+            )
+            adj = ak.stock_zh_a_hist(
                 symbol=code,
                 period="daily",
                 start_date=start_str,
@@ -62,11 +83,20 @@ class AkShareDataSource(BaseDataSource):
             logger.error(f"获取 {code} 日线数据失败: {e}")
             return pd.DataFrame()
 
-        if df.empty:
-            return df
+        if adj is None or adj.empty:
+            return pd.DataFrame()
 
-        df = self._standardize_daily(df, code)
-        return df
+        # 标准化两份数据，便于按日期对齐
+        df_raw = self._standardize_daily(raw, code) if (raw is not None and not raw.empty) else pd.DataFrame()
+        df_adj = self._standardize_daily(adj, code)
+
+        # 若没有未复权数据，则直接返回复权数据（无法调整成交量）
+        if df_raw.empty:
+            return df_adj
+
+        # 将成交量复权的逻辑交由单独方法处理
+        result = self._compute_adjusted_volume(code, df_raw, df_adj)
+        return result
 
     # ------------------------------------------------------------------
     # 指数日线
@@ -328,6 +358,147 @@ class AkShareDataSource(BaseDataSource):
         standard_cols = ["code", "date", "open", "high", "low", "close", "volume", "amount"]
         df = df[[c for c in standard_cols if c in df.columns]]
         return df
+
+    def _compute_adjusted_volume(
+        self,
+        code: str,
+        df_raw: pd.DataFrame,
+        df_adj: pd.DataFrame,
+    ) -> pd.DataFrame:
+        """基于未复权与复权收盘价计算复权因子，更新成交量。
+
+        计算逻辑::
+
+            adj_factor = close_adj / close_raw
+            adjusted_volume = volume_raw / adj_factor
+
+        本方法 **不做任何回退或填充**，所有异常数据均通过 logger
+        记录 code 与受影响日期/行数，由上层决定是否剔除。
+
+        Parameters
+        ----------
+        code : str
+            股票代码，仅用于日志标识。
+        df_raw : DataFrame
+            未复权日线（至少含 date, close, volume）。
+        df_adj : DataFrame
+            复权日线（标准列）。
+
+        Returns
+        -------
+        DataFrame
+            与 df_adj 结构一致，volume 列已替换为复权成交量。
+        """
+        # ---- 0. 空数据检查 ----
+        if df_raw is None or df_raw.empty:
+            logger.warning(f"[{code}] 未复权数据为空，无法计算复权成交量")
+            return df_adj
+
+        # ---- 1. 按日期合并 ----
+        merged = pd.merge(
+            df_adj,
+            df_raw[["date", "close", "volume"]].rename(
+                columns={"close": "close_raw", "volume": "volume_raw"},
+            ),
+            on="date",
+            how="left",
+        )
+
+        # 检查：合并后是否有日期未匹配（df_adj 有但 df_raw 无）
+        unmatched = merged["close_raw"].isna()
+        if unmatched.any():
+            dates = merged.loc[unmatched, "date"].dt.strftime("%Y-%m-%d").tolist()
+            logger.warning(
+                f"[{code}] {len(dates)} 个交易日缺少未复权数据，"
+                f"日期: {dates[:10]}{'...' if len(dates) > 10 else ''}"
+            )
+
+        # ---- 2. 数值类型强制转换 ----
+        for col in ("close", "close_raw", "volume_raw"):
+            merged[col] = pd.to_numeric(merged[col], errors="coerce")
+
+        # 检查：转换后产生的新 NaN（原始值为非数值字符串等）
+        for col in ("close", "close_raw", "volume_raw"):
+            nan_count = int(merged[col].isna().sum())
+            if nan_count > 0:
+                logger.warning(f"[{code}] 列 {col} 存在 {nan_count} 个非数值/NaN")
+
+        # ---- 3. 异常值检查 ----
+        # close_raw <= 0（含 0）→ 无法计算因子
+        bad_close_raw = merged["close_raw"].le(0) & merged["close_raw"].notna()
+        if bad_close_raw.any():
+            dates = merged.loc[bad_close_raw, "date"].dt.strftime("%Y-%m-%d").tolist()
+            logger.warning(
+                f"[{code}] close_raw <= 0 共 {len(dates)} 行，"
+                f"日期: {dates[:10]}{'...' if len(dates) > 10 else ''}"
+            )
+            merged.loc[bad_close_raw, "close_raw"] = np.nan
+
+        # close_adj <= 0
+        bad_close_adj = merged["close"].le(0) & merged["close"].notna()
+        if bad_close_adj.any():
+            dates = merged.loc[bad_close_adj, "date"].dt.strftime("%Y-%m-%d").tolist()
+            logger.warning(
+                f"[{code}] close_adj <= 0 共 {len(dates)} 行，"
+                f"日期: {dates[:10]}{'...' if len(dates) > 10 else ''}"
+            )
+
+        # volume_raw < 0
+        bad_vol = merged["volume_raw"].lt(0) & merged["volume_raw"].notna()
+        if bad_vol.any():
+            dates = merged.loc[bad_vol, "date"].dt.strftime("%Y-%m-%d").tolist()
+            logger.warning(
+                f"[{code}] volume_raw < 0 共 {len(dates)} 行，"
+                f"日期: {dates[:10]}{'...' if len(dates) > 10 else ''}"
+            )
+
+        # ---- 4. 计算复权因子 ----
+        adj_factor = merged["close"] / merged["close_raw"]  # close_raw <= 0 已置 NaN
+
+        # 检查：因子异常（inf / 极端值）
+        inf_mask = np.isinf(adj_factor)
+        if inf_mask.any():
+            dates = merged.loc[inf_mask, "date"].dt.strftime("%Y-%m-%d").tolist()
+            logger.warning(
+                f"[{code}] adj_factor 出现 inf 共 {len(dates)} 行，"
+                f"日期: {dates[:10]}{'...' if len(dates) > 10 else ''}"
+            )
+            adj_factor = adj_factor.replace([np.inf, -np.inf], np.nan)
+
+        factor_nan = adj_factor.isna()
+        if factor_nan.any():
+            logger.warning(f"[{code}] adj_factor 为 NaN 共 {int(factor_nan.sum())} 行")
+
+        # ---- 5. 计算复权成交量 ----
+        merged["volume"] = merged["volume_raw"] / adj_factor
+
+        # 检查：最终 volume 异常
+        vol = merged["volume"]
+        vol_na = vol.isna()
+        vol_neg = vol.lt(0) & vol.notna()
+        vol_inf = np.isinf(vol)
+
+        anomaly_parts: list[str] = []
+        if vol_na.any():
+            anomaly_parts.append(f"NaN={int(vol_na.sum())}")
+        if vol_neg.any():
+            anomaly_parts.append(f"负值={int(vol_neg.sum())}")
+        if vol_inf.any():
+            anomaly_parts.append(f"inf={int(vol_inf.sum())}")
+            merged.loc[vol_inf, "volume"] = np.nan
+
+        if anomaly_parts:
+            logger.warning(
+                f"[{code}] 复权成交量异常汇总: {', '.join(anomaly_parts)}，"
+                f"请在上层剔除或处理"
+            )
+
+        # ---- 6. 输出标准列 ----
+        standard_cols = [
+            "code", "date", "open", "high", "low", "close",
+            "volume", "amount", "turnover", "pct_change", "change",
+        ]
+        return merged[[c for c in standard_cols if c in merged.columns]]
 
 
 # 注册到工厂

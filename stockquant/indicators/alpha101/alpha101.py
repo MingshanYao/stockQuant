@@ -299,8 +299,9 @@ class Alpha101Engine:
         if vwap is not None:
             self.vwap = vwap
         elif amount is not None:
-            # VWAP = 成交额 / 成交量
-            self.vwap = amount / (volume + 1e-10)
+            # VWAP = 成交额 / (成交量 × 100)
+            # 成交额单位: 元（与复权无关），成交量单位: 手（1手=100股）
+            self.vwap = amount / (volume * 100 + 1e-10)
         else:
             self.vwap = (high + low + close) / 3
         self.returns = returns if returns is not None else close.pct_change()
