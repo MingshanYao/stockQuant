@@ -1,42 +1,52 @@
 """
-WorldQuant Alpha#101 因子指标 — 继承 BaseIndicator，融入 indicators 体系。
+WorldQuant Alpha#101 因子指标 — 基于 BacktestDataset 的多股票面板计算。
 
-基于 Kakushadze (2016) *"101 Formulaic Alphas"* 论文，
-完整实现全部 101 个 Alpha 因子公式。
+基于 Kakushadze (2016) *"101 Formulaic Alphas"* 论文，完整实现全部 101 个 Alpha 因子公式。
 
-单股票模式 (BaseIndicator 接口)
--------------------------------
+推荐用法（Dataset 模式）
+------------------------
+从 ``StockUniverse.load()`` 返回的 ``BacktestDataset`` 直接构建因子引擎：
+
+>>> from stockquant.data.universe import Pool, StockUniverse
 >>> from stockquant.indicators import Alpha101Indicators
->>> indicator = Alpha101Indicators()
->>> df = indicator.compute(df)            # 附加全部 alpha 因子列
->>> df = indicator.compute(df, alphas=[1, 6, 12, 101])  # 只计算指定因子
+>>>
+>>> dataset = (
+...     StockUniverse()
+...     .scope(Pool.CSI300)
+...     .exclude(Pool.STAR, Pool.CHINEXT)
+...     .load("2020-01-01", "2025-12-31")
+... )
+>>>
+>>> engine = Alpha101Indicators.from_dataset(dataset)
+>>> alpha001 = engine.alpha001()            # 单因子，返回 DataFrame (日期 × 代码)
+>>> all_factors = engine.compute_all()      # 全部因子，返回 dict[int, DataFrame]
+>>> selected = engine.compute_factors([1, 6, 12, 101])  # 指定因子列表
 
-面板模式 (多股票截面计算)
---------------------------
+面板模式（原始接口）
+--------------------
 >>> engine = Alpha101Indicators.panel(
 ...     open_=open_df, high=high_df, low=low_df,
 ...     close=close_df, volume=volume_df,
 ... )
->>> factor_1 = engine.alpha001()
->>> all_factors = engine.compute_all()
+>>> alpha001 = engine.alpha001()
 
 Notes
 -----
-- VWAP 优先使用用户传入的值；其次通过 ``amount / volume``
-  （成交额 / 成交量）自动计算；最终 fallback 到 ``(high + low + close) / 3``。
-- 涉及行业中性化 (IndNeutralize) 和市值 (cap) 的因子，当 ``industry`` / ``cap``
-  参数缺失时，默认自动从本地 ``stock_info`` 数据库表加载（通过列名匹配股票代码）。
-  若数据库也无数据，则行业中性化跳过，市值用 ``close`` 近似。
-  可通过 ``auto_load_info=False`` 禁用自动加载。
+- VWAP 优先使用 ``amount / volume`` 自动计算；若缺失则 fallback 到 ``(high + low + close) / 3``。
+- 行业中性化 (IndNeutralize) 和市值 (cap) 缺失时，自动从本地 ``stock_info`` 表加载。
+  可通过 ``auto_load_info=False`` 禁用。
 - 论文中部分窗口参数为浮点数，实现时取整为 ``int``。
 """
 
 from __future__ import annotations
 
-from typing import Any, Sequence
+from typing import TYPE_CHECKING, Any, Sequence
 
 import numpy as np
 import pandas as pd
+
+if TYPE_CHECKING:
+    from stockquant.data.universe import BacktestDataset
 
 from stockquant.indicators.base import BaseIndicator
 from stockquant.indicators.alpha101.operators import (
@@ -190,6 +200,65 @@ class Alpha101Indicators(BaseIndicator):
             volume=volume, vwap=vwap, amount=amount, returns=returns,
             cap=cap, industry=industry, auto_load_info=auto_load_info,
         )
+
+    @classmethod
+    def from_dataset(
+        cls,
+        dataset: "BacktestDataset",
+        auto_load_info: bool = True,
+    ) -> "Alpha101Engine":
+        """**推荐入口** — 从 ``BacktestDataset`` 直接构建面板计算引擎。
+
+        ``BacktestDataset`` 由 ``StockUniverse.load()`` 返回，包含多只股票的
+        日线数据字典。本方法自动将其转换为面板格式（行=日期，列=股票代码）
+        并创建 :class:`Alpha101Engine`。
+
+        Parameters
+        ----------
+        dataset : BacktestDataset
+            由 ``StockUniverse.load()`` 返回的回测数据集。
+        auto_load_info : bool, default True
+            当 ``industry`` / ``cap`` 缺失时，是否自动从本地 stock_info 表加载。
+
+        Returns
+        -------
+        Alpha101Engine
+            面板计算引擎，提供 ``alpha001()`` ... ``alpha101()``、
+            ``compute_all()``、``compute_factors()`` 方法。
+
+        Examples
+        --------
+        >>> from stockquant.data.universe import Pool, StockUniverse
+        >>> from stockquant.indicators import Alpha101Indicators
+        >>>
+        >>> dataset = (
+        ...     StockUniverse()
+        ...     .scope(Pool.CSI300)
+        ...     .exclude(Pool.STAR, Pool.CHINEXT)
+        ...     .load("2020-01-01", "2025-12-31")
+        ... )
+        >>> engine = Alpha101Indicators.from_dataset(dataset)
+        >>> alpha001 = engine.alpha001()
+        >>> factors = engine.compute_factors([1, 6, 12])
+        >>> all_factors = engine.compute_all()
+        """
+        stacked = cls._stack_dataset(dataset)
+        return cls.from_stacked_df(stacked, auto_load_info=auto_load_info)
+
+    @staticmethod
+    def _stack_dataset(dataset: "BacktestDataset") -> pd.DataFrame:
+        """将 BacktestDataset.stock_data 转换为长格式 DataFrame。"""
+        frames: list[pd.DataFrame] = []
+        for code, df in dataset.stock_data.items():
+            tmp = df.copy()
+            tmp["code"] = code
+            tmp["date"] = pd.to_datetime(tmp["date"])
+            frames.append(tmp)
+        if not frames:
+            raise ValueError("dataset.stock_data 为空，无法构建 Alpha101 引擎")
+        stacked = pd.concat(frames, ignore_index=True)
+        stacked = stacked.sort_values(["date", "code"]).reset_index(drop=True)
+        return stacked
 
     @classmethod
     def from_stacked_df(
@@ -434,6 +503,33 @@ class Alpha101Engine:
             return pd.DataFrame(
                 index=self.close.index, columns=self.close.columns, dtype=float
             )
+
+    def compute_factors(
+        self,
+        alpha_ids: Sequence[int],
+    ) -> dict[int, pd.DataFrame]:
+        """计算指定编号的 Alpha 因子列表。
+
+        Parameters
+        ----------
+        alpha_ids : list[int]
+            要计算的因子编号列表，如 ``[1, 6, 12, 101]``。
+
+        Returns
+        -------
+        dict[int, DataFrame]
+            {因子编号: 面板 DataFrame (日期 × 代码)}。
+
+        Examples
+        --------
+        >>> factors = engine.compute_factors([1, 6, 12])
+        >>> factors[1]   # Alpha#001 面板数据
+        """
+        results: dict[int, pd.DataFrame] = {}
+        for i in alpha_ids:
+            results[i] = self.compute_factor(i)
+        logger.info(f"计算 {len(results)} 个指定 Alpha 因子: {list(alpha_ids)}")
+        return results
 
     def compute_all(
         self,
