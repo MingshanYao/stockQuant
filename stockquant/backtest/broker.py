@@ -97,6 +97,11 @@ class Broker:
         new_quantity = pos.quantity + order.quantity
         pos.avg_cost = (old_value + total_cost) / new_quantity if new_quantity > 0 else 0
         pos.quantity = new_quantity
+        # 同步当前价，避免 update_portfolio_value 因 current_price=0（新建仓默认值）
+        # 导致市值低估，进而产生虚假的巨额最大回撤
+        pos.current_price = exec_price
+        pos.market_value = pos.quantity * exec_price
+        pos.unrealized_pnl = (exec_price - pos.avg_cost) * pos.quantity
         pos.buy_date = str(self.ctx.current_date)
 
         if self.t_plus_1:

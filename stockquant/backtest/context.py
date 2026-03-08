@@ -86,11 +86,19 @@ class Context:
             pos.unrealized_pnl = (price - pos.avg_cost) * pos.quantity
 
     def update_portfolio_value(self) -> None:
-        """重新计算组合总市值。"""
-        position_value = sum(
-            pos.quantity * pos.current_price
-            for pos in self.portfolio.positions.values()
-        )
+        """重新计算组合总市值。
+
+        注意：优先使用 ``_price_cache`` 中的当日最新收盘价，而非
+        ``pos.current_price``。后者在当日首次建仓时仍为默认值 0，
+        会导致仓位市值被低估，进而产生虚假的巨额回撤。
+        """
+        position_value = 0.0
+        for code, pos in self.portfolio.positions.items():
+            if pos.quantity > 0:
+                # 当日已更新到 _price_cache 的最新价优先；
+                # 若不在缓存（如停牌），则用持仓对象上次记录的价格。
+                price = self._price_cache.get(code) or pos.current_price
+                position_value += pos.quantity * price
         self.portfolio.total_value = self.portfolio.cash + position_value
 
     def record_equity(self) -> None:
