@@ -39,7 +39,11 @@ data_fetch:
   start_date: "2020-01-01"  # 默认起始日期
   end_date: ""              # 默认结束日期，空表示至今
   adjust: hfq               # 复权方式: qfq(前复权) / hfq(后复权) / none
-  frequency: daily           # daily / weekly / monthly / 1min / 5min / 15min / 30min / 60min
+  frequency: daily          # daily / weekly / monthly / 1min / 5min / 15min / 30min / 60min
+  # 批量拉取并发参数（AkShare 上游对高并发敏感，默认值偏保守）
+  max_workers: 4            # 最大并发线程数；过高易触发限流封 IP
+  timeout: 30               # 单次 fetch 超时秒数
+  queue_maxsize: 200        # 生产-消费队列容量（背压）
 
 # ---------- 回测设置 ----------
 backtest:

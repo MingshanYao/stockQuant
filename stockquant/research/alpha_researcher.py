@@ -350,6 +350,87 @@ class AlphaResearcher:
         return results
 
     # ==================================================================
+    # IC 批量分析
+    # ==================================================================
+
+    def ic_summary(
+        self,
+        alpha_ids: Sequence[int] | None = None,
+        forward_periods: int = 1,
+        method: str = "spearman",
+    ) -> pd.DataFrame:
+        """批量计算 Alpha 因子 IC / IR / 覆盖率，返回汇总 DataFrame。
+
+        Parameters
+        ----------
+        alpha_ids : list[int], optional
+            要评估的因子编号，默认全部 101 个。
+        forward_periods : int, default 1
+            前向收益的天数，默认 T+1（次日收益）。
+        method : str, default "spearman"
+            相关系数方法：``spearman`` (Rank IC) 或 ``pearson``。
+
+        Returns
+        -------
+        DataFrame
+            列：alpha, coverage, ic_mean, ic_std, ic_ir, ic_pos_ratio, mean, std。
+            按 ``|ic_mean|`` 降序排列。
+
+        Notes
+        -----
+        采用 ``DataFrame.corrwith(axis=1)`` 向量化逐日截面相关，比
+        :func:`stockquant.analysis.factor.FactorAnalyzer.calc_ic_series`
+        的 Python 循环快约 1 个数量级，适合 101 个因子全量批跑。
+
+        Examples
+        --------
+        >>> researcher = AlphaResearcher(dataset)
+        >>> summary = researcher.ic_summary()                  # 全部
+        >>> top10 = researcher.ic_summary([1, 6, 12, 41, 54, 101])  # 指定因子
+        """
+        if alpha_ids is None:
+            alpha_ids = list(range(1, 102))
+
+        engine = self.alpha_engine
+        close = engine.close
+        forward_returns = close.pct_change(periods=forward_periods).shift(-forward_periods)
+
+        rows = []
+        total = len(alpha_ids)
+        for i, alpha_id in enumerate(alpha_ids, 1):
+            print(f"  [{i}/{total}] IC summary alpha{alpha_id:03d}...", end="\r")
+            factor = self.get_alpha_panel(alpha_id)
+
+            common_idx = factor.index.intersection(forward_returns.index)
+            common_cols = factor.columns.intersection(forward_returns.columns)
+            f = factor.loc[common_idx, common_cols]
+            r = forward_returns.loc[common_idx, common_cols]
+
+            try:
+                ic_per_day = f.corrwith(r, axis=1, method=method).dropna()
+            except Exception as e:
+                logger.warning(f"Alpha{alpha_id:03d} IC 计算失败: {e}")
+                ic_per_day = pd.Series(dtype=float)
+
+            valid_vals = factor.values[np.isfinite(factor.values)]
+            rows.append({
+                "alpha":        alpha_id,
+                "coverage":     factor.notna().sum().sum() / max(factor.size, 1),
+                "ic_mean":      ic_per_day.mean() if len(ic_per_day) else np.nan,
+                "ic_std":       ic_per_day.std() if len(ic_per_day) else np.nan,
+                "ic_ir":        (ic_per_day.mean() / ic_per_day.std()
+                                 if len(ic_per_day) and ic_per_day.std() > 0 else np.nan),
+                "ic_pos_ratio": (ic_per_day > 0).mean() if len(ic_per_day) else np.nan,
+                "mean":         valid_vals.mean() if valid_vals.size else np.nan,
+                "std":          valid_vals.std() if valid_vals.size else np.nan,
+            })
+        print(f"✅ 已计算 {total} 个因子 IC 汇总          ")
+
+        df = pd.DataFrame(rows)
+        df = df.reindex(df["ic_mean"].abs().sort_values(ascending=False).index).reset_index(drop=True)
+        return df
+
+    # ==================================================================
     # 绩效分析
     # ==================================================================
 

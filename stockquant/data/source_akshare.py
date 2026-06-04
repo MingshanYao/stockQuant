@@ -5,6 +5,7 @@ AkShare 数据源适配器。
 from __future__ import annotations
 
 import datetime as dt
+import threading
 from typing import Any
 
 import akshare as ak
@@ -13,10 +14,19 @@ import numpy as np
 
 from stockquant.data.data_source import BaseDataSource, DataSourceFactory
 from stockquant.utils.concurrent import parallel_fetch_serial_consume
-from stockquant.utils.helpers import normalize_stock_code, get_market_prefix, ensure_date
+from stockquant.utils.helpers import (
+    call_with_retries,
+    ensure_date,
+    get_market_prefix,
+    normalize_stock_code,
+)
 from stockquant.utils.logger import get_logger
 
 logger = get_logger("data.akshare")
+
+# 进程级锁：新浪 stock_zh_a_daily 内部使用 py-mini-racer，
+# 同进程多线程并发调用会触发 v8 内存池 double-init 崩溃，故串行化。
+_SINA_LOCK = threading.Lock()
 
 
 class AkShareDataSource(BaseDataSource):
@@ -42,61 +52,125 @@ class AkShareDataSource(BaseDataSource):
         end_date: str | dt.date,
         adjust: str = "hfq",
     ) -> pd.DataFrame:
-        code = normalize_stock_code(code)
-        start_str = str(ensure_date(start_date)).replace("-", "")
-        end_str = str(ensure_date(end_date)).replace("-", "")
+        """获取日线，主走东方财富接口，失败/空则回退新浪。
 
-        logger.debug(f"AkShare 日线: {code} [{start_str} ~ {end_str}] adjust={adjust}")
+        - 主路径 ``stock_zh_a_hist`` (东方财富): 提供未复权 + 复权双拉，可精确计算复权成交量
+        - 备路径 ``stock_zh_a_daily`` (新浪): 单次拉复权数据，复权成交量直出
+
+        两路径均带指数退避重试。两次都失败时返回空 DataFrame。
+        """
+        code = normalize_stock_code(code)
+        sd = ensure_date(start_date)
+        ed = ensure_date(end_date)
+        logger.debug(f"AkShare 日线: {code} [{sd} ~ {ed}] adjust={adjust}")
 
         adjust_map = {"qfq": "qfq", "hfq": "hfq", "none": ""}
         ak_adjust = adjust_map.get(adjust, "hfq")
 
-        # 如果不需要复权，直接请求一次并返回
+        # ---- 主路径：东方财富 ----
         try:
-            if ak_adjust == "":
-                raw = ak.stock_zh_a_hist(
-                    symbol=code,
-                    period="daily",
-                    start_date=start_str,
-                    end_date=end_str,
-                )
-                if raw is None or raw.empty:
-                    return pd.DataFrame()
-                return self._standardize_daily(raw, code)
-
-            # 需要复权时，同时拉取未复权与复权数据，计算复权因子以调整成交量
-            raw = ak.stock_zh_a_hist(
-                symbol=code,
-                period="daily",
-                start_date=start_str,
-                end_date=end_str,
-                adjust="",
+            df = call_with_retries(
+                lambda: self._fetch_eastmoney_hist(code, sd, ed, ak_adjust),
+                attempts=2,
+                delay=0.5,
+                label=f"eastmoney {code}",
             )
-            adj = ak.stock_zh_a_hist(
-                symbol=code,
-                period="daily",
-                start_date=start_str,
-                end_date=end_str,
-                adjust=ak_adjust,
-            )
+            if df is not None and not df.empty:
+                return df
         except Exception as e:
-            logger.error(f"获取 {code} 日线数据失败: {e}")
-            return pd.DataFrame()
+            logger.warning(f"东方财富拉取 {code} 失败，切换新浪: {e}")
 
+        # ---- 备路径：新浪 ----
+        try:
+            df = call_with_retries(
+                lambda: self._fetch_sina_daily(code, sd, ed, ak_adjust),
+                attempts=2,
+                delay=0.5,
+                label=f"sina {code}",
+            )
+            if df is not None and not df.empty:
+                return df
+        except Exception as e:
+            logger.error(f"新浪拉取 {code} 也失败: {e}")
+
+        return pd.DataFrame()
+
+    # ---- 主路径：东方财富 stock_zh_a_hist ----
+    def _fetch_eastmoney_hist(
+        self,
+        code: str,
+        start_date: dt.date,
+        end_date: dt.date,
+        ak_adjust: str,
+    ) -> pd.DataFrame:
+        """走 ``ak.stock_zh_a_hist``。无复权时单次拉取；有复权时双拉计算复权成交量。"""
+        start_str = str(start_date).replace("-", "")
+        end_str = str(end_date).replace("-", "")
+
+        if ak_adjust == "":
+            raw = ak.stock_zh_a_hist(
+                symbol=code, period="daily",
+                start_date=start_str, end_date=end_str,
+            )
+            if raw is None or raw.empty:
+                return pd.DataFrame()
+            return self._standardize_daily(raw, code)
+
+        raw = ak.stock_zh_a_hist(
+            symbol=code, period="daily",
+            start_date=start_str, end_date=end_str, adjust="",
+        )
+        adj = ak.stock_zh_a_hist(
+            symbol=code, period="daily",
+            start_date=start_str, end_date=end_str, adjust=ak_adjust,
+        )
         if adj is None or adj.empty:
             return pd.DataFrame()
 
-        # 标准化两份数据，便于按日期对齐
         df_raw = self._standardize_daily(raw, code) if (raw is not None and not raw.empty) else pd.DataFrame()
         df_adj = self._standardize_daily(adj, code)
-
-        # 若没有未复权数据，则直接返回复权数据（无法调整成交量）
         if df_raw.empty:
             return df_adj
+        return self._compute_adjusted_volume(code, df_raw, df_adj)
 
-        # 将成交量复权的逻辑交由单独方法处理
-        result = self._compute_adjusted_volume(code, df_raw, df_adj)
-        return result
+    # ---- 备路径：新浪 stock_zh_a_daily ----
+    def _fetch_sina_daily(
+        self,
+        code: str,
+        start_date: dt.date,
+        end_date: dt.date,
+        ak_adjust: str,
+    ) -> pd.DataFrame:
+        """走 ``ak.stock_zh_a_daily``（新浪）。返回字段比东方财富多 ``outstanding_share``，已复权直出。
+
+        Notes
+        -----
+        AkShare 的新浪接口内部使用 ``py-mini-racer`` (V8 JS 引擎)，**不是线程安全**。
+        同进程多线程并发调用会触发 ``Check failed: !pool->IsInitialized()`` 崩溃，
+        故全局加锁串行化。
+        """
+        symbol = f"{get_market_prefix(code)}{code}"
+        with _SINA_LOCK:
+            df = ak.stock_zh_a_daily(
+                symbol=symbol,
+                start_date=str(start_date),
+                end_date=str(end_date),
+                adjust=ak_adjust,
+            )
+        if df is None or df.empty:
+            return pd.DataFrame()
+
+        df = df.copy()
+        df["date"] = pd.to_datetime(df["date"])
+        df["code"] = code
+        df["pct_change"] = df["close"].pct_change()
+        df["change"] = df["close"].diff()
+        # 对齐 daily_bars 表 schema
+        standard_cols = [
+            "code", "date", "open", "high", "low", "close",
+            "volume", "amount", "turnover", "pct_change", "change",
+        ]
+        return df[[c for c in standard_cols if c in df.columns]]
 
     # ------------------------------------------------------------------
     # 指数日线
@@ -114,26 +188,41 @@ class AkShareDataSource(BaseDataSource):
         logger.debug(f"AkShare 指数日线: {code} [{start_str} ~ {end_str}]")
 
         # 优先使用 index_zh_a_hist（覆盖所有指数，含中证2000等）
-        try:
+        def _primary() -> pd.DataFrame:
             df = ak.index_zh_a_hist(
                 symbol=code, period="daily",
                 start_date=start_str, end_date=end_str,
             )
+            if df is None or df.empty:
+                return pd.DataFrame()
+            return self._standardize_index(df, code)
+
+        try:
+            df = call_with_retries(_primary, attempts=2, delay=0.5, label=f"index_zh_a_hist {code}")
             if not df.empty:
-                return self._standardize_index(df, code)
+                return df
         except Exception as e:
             logger.debug(f"index_zh_a_hist({code}) 失败，尝试备用接口: {e}")
 
         # 备用：stock_zh_index_daily（部分老指数仅此接口有数据）
-        try:
+        def _fallback() -> pd.DataFrame:
             df = ak.stock_zh_index_daily(symbol=f"{get_market_prefix(code)}{code}")
+            if df is None or df.empty:
+                return pd.DataFrame()
+            # AkShare 上游偶发返回非 CSV (HTML 错误页) → 缺 'date' 列；显式抛错走重试
+            if "date" not in df.columns:
+                raise ValueError(f"stock_zh_index_daily({code}) 返回数据缺 date 列")
+            df = df.copy()
+            df["date"] = pd.to_datetime(df["date"])
+            sd_ts = pd.Timestamp(ensure_date(start_date))
+            ed_ts = pd.Timestamp(ensure_date(end_date))
+            df = df[(df["date"] >= sd_ts) & (df["date"] <= ed_ts)]
+            return self._standardize_index(df, code)
+
+        try:
+            df = call_with_retries(_fallback, attempts=2, delay=0.5, label=f"stock_zh_index_daily {code}")
             if not df.empty:
-                # 统一 date 列为 datetime 再过滤
-                df["date"] = pd.to_datetime(df["date"])
-                sd = pd.Timestamp(ensure_date(start_date))
-                ed = pd.Timestamp(ensure_date(end_date))
-                df = df[(df["date"] >= sd) & (df["date"] <= ed)]
-                return self._standardize_index(df, code)
+                return df
         except Exception as e:
             logger.error(f"获取指数 {code} 日线失败: {e}")
 
@@ -192,7 +281,12 @@ class AkShareDataSource(BaseDataSource):
 
         # ---- 1. 全市场实时快照 ----
         try:
-            spot = ak.stock_zh_a_spot_em()
+            spot = call_with_retries(
+                ak.stock_zh_a_spot_em,
+                attempts=3,
+                delay=1.0,
+                label="stock_zh_a_spot_em",
+            )
         except Exception as e:
             logger.error(f"获取全市场实时行情失败: {e}")
             return pd.DataFrame()
@@ -254,7 +348,12 @@ class AkShareDataSource(BaseDataSource):
         code_to_industry: dict[str, str] = {}
 
         try:
-            boards = ak.stock_board_industry_name_em()
+            boards = call_with_retries(
+                ak.stock_board_industry_name_em,
+                attempts=3,
+                delay=1.0,
+                label="stock_board_industry_name_em",
+            )
         except Exception as e:
             logger.error(f"获取行业板块列表失败: {e}")
             return code_to_industry

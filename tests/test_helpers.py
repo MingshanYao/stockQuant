@@ -4,6 +4,7 @@ import datetime as dt
 import pytest
 
 from stockquant.utils.helpers import (
+    call_with_retries,
     ensure_date,
     normalize_stock_code,
     get_market_prefix,
@@ -69,3 +70,42 @@ class TestSplitList:
     def test_exact(self):
         result = split_list([1, 2, 3, 4], 2)
         assert result == [[1, 2], [3, 4]]
+
+
+class TestCallWithRetries:
+    def test_returns_first_success(self):
+        calls = {"n": 0}
+        def fn():
+            calls["n"] += 1
+            return "ok"
+        assert call_with_retries(fn) == "ok"
+        assert calls["n"] == 1
+
+    def test_retries_then_succeeds(self):
+        calls = {"n": 0}
+        def fn():
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise RuntimeError("transient")
+            return "ok"
+        assert call_with_retries(fn, attempts=3, delay=0.01, backoff=1.0) == "ok"
+        assert calls["n"] == 3
+
+    def test_exhausts_and_raises(self):
+        calls = {"n": 0}
+        def fn():
+            calls["n"] += 1
+            raise RuntimeError("hard fail")
+        with pytest.raises(RuntimeError, match="hard fail"):
+            call_with_retries(fn, attempts=2, delay=0.01, backoff=1.0)
+        assert calls["n"] == 2
+
+    def test_on_error_hook_invoked_each_attempt(self):
+        seen: list[tuple[int, str]] = []
+        def hook(exc, attempt):
+            seen.append((attempt, str(exc)))
+        def fn():
+            raise ValueError("boom")
+        with pytest.raises(ValueError):
+            call_with_retries(fn, attempts=3, delay=0.01, backoff=1.0, on_error=hook)
+        assert [a for a, _ in seen] == [1, 2, 3]

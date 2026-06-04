@@ -37,8 +37,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import sys
-import time
-from typing import Any, Callable, Sequence
+from typing import Sequence
 
 import akshare as ak
 import pandas as pd
@@ -48,7 +47,7 @@ from stockquant.data.data_source import BaseDataSource, DataSourceFactory
 from stockquant.data.database import Database
 from stockquant.utils.concurrent import parallel_fetch_serial_consume
 from stockquant.utils.config import Config
-from stockquant.utils.helpers import ensure_date, normalize_stock_code
+from stockquant.utils.helpers import call_with_retries, ensure_date, normalize_stock_code
 from stockquant.utils.logger import get_logger
 
 logger = get_logger("data.updater")
@@ -105,7 +104,10 @@ def get_index_constituents(index_code: str) -> list[str]:
     index_code = normalize_stock_code(index_code)
     logger.info(f"获取指数 {index_code} 成分股列表")
     try:
-        df = _call_with_retries(lambda: ak.index_stock_cons(symbol=index_code))
+        df = call_with_retries(
+            lambda: ak.index_stock_cons(symbol=index_code),
+            label=f"index_stock_cons {index_code}",
+        )
         codes = df["品种代码"].astype(str).str.zfill(6).drop_duplicates().tolist()
         logger.info(f"指数 {index_code} 成分股: {len(codes)} 只")
         return codes
@@ -118,7 +120,10 @@ def get_all_a_codes() -> list[str]:
     """获取全部 A 股代码列表。"""
     logger.info("获取全部 A 股代码列表")
     try:
-        df = _call_with_retries(lambda: ak.stock_info_a_code_name())
+        df = call_with_retries(
+            ak.stock_info_a_code_name,
+            label="stock_info_a_code_name",
+        )
         df.columns = ["code", "name"]
         codes = df["code"].astype(str).str.zfill(6).tolist()
         logger.info(f"全部 A 股: {len(codes)} 只")
@@ -126,27 +131,6 @@ def get_all_a_codes() -> list[str]:
     except Exception as e:
         logger.error(f"获取 A 股列表失败: {e}")
         return []
-
-
-def _call_with_retries(
-    fn: Callable[[], Any],
-    attempts: int = 3,
-    delay: float = 1.0,
-    backoff: float = 2.0,
-) -> Any:
-    """带重试的可调用对象执行。"""
-    last_exc: Exception | None = None
-    cur_delay = delay
-    for i in range(1, attempts + 1):
-        try:
-            return fn()
-        except Exception as e:
-            last_exc = e
-            logger.warning(f"尝试第 {i}/{attempts} 次失败: {e}")
-            if i < attempts:
-                time.sleep(cur_delay)
-                cur_delay *= backoff
-    raise last_exc  # type: ignore[misc]
 
 
 # ======================================================================
@@ -437,7 +421,7 @@ class DataUpdater:
         failed: list[str] = []
 
         fetch_timeout = int(self.cfg.get("data_fetch.timeout", 30))
-        max_workers = int(self.cfg.get("data_fetch.max_workers", 32))
+        max_workers = int(self.cfg.get("data_fetch.max_workers", 4))
         q_maxsize = int(self.cfg.get("data_fetch.queue_maxsize", 200))
 
         def _fetch(code: str) -> pd.DataFrame:
@@ -453,8 +437,10 @@ class DataUpdater:
                 failed.append(code)
                 logger.warning(f"{code} 拉取出错: {err}")
                 return
+            # 拉取无异常但返回空 DataFrame 视为失败，不再静默计入"成功"
             if df is None or df.empty:
-                results[code] = 0
+                failed.append(code)
+                logger.warning(f"{code} 返回空数据")
                 return
             try:
                 df = self.cleaner.clean_pipeline(df)
