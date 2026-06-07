@@ -9,7 +9,12 @@ import datetime as dt
 import baostock as bs
 import pandas as pd
 
-from stockquant.data.data_source import BaseDataSource, DataSourceFactory
+from stockquant.data.data_source import (
+    BaseDataSource,
+    DataSourceFactory,
+    standardize_daily,
+    standardize_index,
+)
 from stockquant.utils.helpers import normalize_stock_code, get_market_prefix, ensure_date
 from stockquant.utils.logger import get_logger
 
@@ -17,39 +22,54 @@ logger = get_logger("data.baostock")
 
 
 class BaoStockDataSource(BaseDataSource):
-    """基于 BaoStock 的数据源实现。"""
+    """基于 BaoStock 的数据源实现。
+
+    BaoStock 客户端为进程内全局单例，登录后保持连接复用；
+    析构时自动 logout。
+    """
 
     def __init__(self) -> None:
         self._logged_in = False
 
-    def _login(self) -> None:
-        if not self._logged_in:
-            lg = bs.login()
-            if lg.error_code != "0":
-                logger.error(f"BaoStock 登录失败: {lg.error_msg}")
-            else:
-                self._logged_in = True
-
-    def _logout(self) -> None:
+    def _ensure_login(self) -> None:
         if self._logged_in:
-            bs.logout()
+            return
+        lg = bs.login()
+        if lg.error_code != "0":
+            logger.error(f"BaoStock 登录失败: {lg.error_msg}")
+            return
+        self._logged_in = True
+
+    def __del__(self) -> None:
+        if getattr(self, "_logged_in", False):
+            try:
+                bs.logout()
+            except Exception:
+                pass
+
+    @staticmethod
+    def _bs_code(code: str) -> str:
+        """6 位代码转 BaoStock 格式（sh.600000 / sz.000001）。"""
+        code = normalize_stock_code(code)
+        return f"{get_market_prefix(code)}.{code}"
+
+    def _rs_to_df(self, rs) -> pd.DataFrame:
+        rows = []
+        while rs.error_code == "0" and rs.next():
+            rows.append(rs.get_row_data())
+        if rs.error_code != "0":
+            logger.warning(f"BaoStock 查询异常 [{rs.error_code}]: {rs.error_msg}")
             self._logged_in = False
+        return pd.DataFrame(rows, columns=rs.fields)
 
     # ------------------------------------------------------------------
     def get_stock_list(self) -> pd.DataFrame:
-        self._login()
-        try:
-            rs = bs.query_stock_basic()
-            rows = []
-            while rs.error_code == "0" and rs.next():
-                rows.append(rs.get_row_data())
-            df = pd.DataFrame(rows, columns=rs.fields)
-            df = df[df["type"] == "1"]  # 1=股票
-            df = df.rename(columns={"code_name": "name"})
-            df["code"] = df["code"].str.split(".").str[1]
-            return df[["code", "name"]].reset_index(drop=True)
-        finally:
-            self._logout()
+        self._ensure_login()
+        df = self._rs_to_df(bs.query_stock_basic())
+        df = df[df["type"] == "1"]  # 1=股票
+        df = df.rename(columns={"code_name": "name"})
+        df["code"] = df["code"].str.split(".").str[1]
+        return df[["code", "name"]].reset_index(drop=True)
 
     # ------------------------------------------------------------------
     def get_daily_bars(
@@ -59,43 +79,30 @@ class BaoStockDataSource(BaseDataSource):
         end_date: str | dt.date,
         adjust: str = "hfq",
     ) -> pd.DataFrame:
-        code = normalize_stock_code(code)
-        prefix = "sh" if code.startswith(("6", "9")) else "sz"
-        bs_code = f"{prefix}.{code}"
+        bs_code = self._bs_code(code)
         sd = str(ensure_date(start_date))
         ed = str(ensure_date(end_date))
 
         adjust_map = {"qfq": "2", "hfq": "1", "none": "3"}
 
-        self._login()
-        try:
-            rs = bs.query_history_k_data_plus(
-                bs_code,
-                "date,open,high,low,close,volume,amount,turn,pctChg",
-                start_date=sd,
-                end_date=ed,
-                frequency="d",
-                adjustflag=adjust_map.get(adjust, "1"),
-            )
-            rows = []
-            while rs.error_code == "0" and rs.next():
-                rows.append(rs.get_row_data())
-            df = pd.DataFrame(rows, columns=rs.fields)
-        finally:
-            self._logout()
+        self._ensure_login()
+        df = self._rs_to_df(bs.query_history_k_data_plus(
+            bs_code,
+            "date,open,high,low,close,volume,amount,turn,pctChg",
+            start_date=sd,
+            end_date=ed,
+            frequency="d",
+            adjustflag=adjust_map.get(adjust, "1"),
+        ))
 
         if df.empty:
             return df
 
-        numeric_cols = ["open", "high", "low", "close", "volume", "amount", "turn", "pctChg"]
-        for col in numeric_cols:
+        for col in ("open", "high", "low", "close", "volume", "amount", "turn", "pctChg"):
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
 
-        df = df.rename(columns={"turn": "turnover", "pctChg": "pct_change"})
-        df["code"] = code
-        df["date"] = pd.to_datetime(df["date"])
-        return df
+        return standardize_daily(df, normalize_stock_code(code))
 
     # ------------------------------------------------------------------
     def get_index_daily(
@@ -104,56 +111,50 @@ class BaoStockDataSource(BaseDataSource):
         start_date: str | dt.date,
         end_date: str | dt.date,
     ) -> pd.DataFrame:
-        code = normalize_stock_code(code)
-        prefix = get_market_prefix(code)
-        bs_code = f"{prefix}.{code}"
+        bs_code = self._bs_code(code)
         sd = str(ensure_date(start_date))
         ed = str(ensure_date(end_date))
 
-        self._login()
-        try:
-            rs = bs.query_history_k_data_plus(
-                bs_code,
-                "date,open,high,low,close,volume,amount",
-                start_date=sd,
-                end_date=ed,
-                frequency="d",
-            )
-            rows = []
-            while rs.error_code == "0" and rs.next():
-                rows.append(rs.get_row_data())
-            df = pd.DataFrame(rows, columns=rs.fields)
-        finally:
-            self._logout()
+        self._ensure_login()
+        df = self._rs_to_df(bs.query_history_k_data_plus(
+            bs_code,
+            "date,open,high,low,close,volume,amount",
+            start_date=sd,
+            end_date=ed,
+            frequency="d",
+        ))
 
-        df["code"] = code
-        if "date" in df.columns:
-            df["date"] = pd.to_datetime(df["date"])
-        return df
+        if df.empty:
+            return df
+
+        for col in ("open", "high", "low", "close", "volume", "amount"):
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        return standardize_index(df, normalize_stock_code(code))
+
+    # ------------------------------------------------------------------
+    def get_index_constituents(self, index_code: str) -> list[str]:
+        """BaoStock 不提供通用指数成分股接口。"""
+        logger.warning("BaoStock 数据源不支持 get_index_constituents，请使用 AkShare")
+        raise NotImplementedError(
+            "BaoStock 暂不支持 get_index_constituents，请切换 AkShare 数据源。"
+        )
 
     # ------------------------------------------------------------------
     def get_finance_data(self, code: str) -> pd.DataFrame:
-        code = normalize_stock_code(code)
-        prefix = "sh" if code.startswith(("6", "9")) else "sz"
-        bs_code = f"{prefix}.{code}"
+        bs_code = self._bs_code(code)
 
-        self._login()
-        try:
-            rs = bs.query_profit_data(code=bs_code, year=2024, quarter=4)
-            rows = []
-            while rs.error_code == "0" and rs.next():
-                rows.append(rs.get_row_data())
-            df = pd.DataFrame(rows, columns=rs.fields)
-        finally:
-            self._logout()
-
-        return df
+        self._ensure_login()
+        return self._rs_to_df(bs.query_profit_data(code=bs_code, year=2024, quarter=4))
 
     # ------------------------------------------------------------------
     def get_stock_info(self) -> pd.DataFrame:
-        """BaoStock 暂不支持批量获取股票基本信息，返回空 DataFrame。"""
+        """BaoStock 暂不支持批量获取股票基本信息。"""
         logger.warning("BaoStock 数据源不支持 get_stock_info，请使用 AkShare")
-        return pd.DataFrame()
+        raise NotImplementedError(
+            "BaoStock 暂不支持 get_stock_info，请切换 AkShare 数据源。"
+        )
 
     # ------------------------------------------------------------------
     def get_trade_dates(
@@ -164,18 +165,9 @@ class BaoStockDataSource(BaseDataSource):
         sd = str(ensure_date(start_date))
         ed = str(ensure_date(end_date))
 
-        self._login()
-        try:
-            rs = bs.query_trade_dates(start_date=sd, end_date=ed)
-            rows = []
-            while rs.error_code == "0" and rs.next():
-                rows.append(rs.get_row_data())
-            df = pd.DataFrame(rows, columns=rs.fields)
-        finally:
-            self._logout()
-
-        trade_days = df[df["is_trading_day"] == "1"]["calendar_date"].tolist()
-        return trade_days
+        self._ensure_login()
+        df = self._rs_to_df(bs.query_trade_dates(start_date=sd, end_date=ed))
+        return df[df["is_trading_day"] == "1"]["calendar_date"].tolist()
 
 
 # 注册到工厂

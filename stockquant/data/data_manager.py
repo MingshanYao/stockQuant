@@ -1,5 +1,12 @@
 """
-数据管理器 — 统一的数据获取 / 存储 / 更新入口。
+数据管理器 — 只读门面。
+
+职责：
+- 从本地 DuckDB 查询日线 / 指数 / 股票信息；
+- 当本地数据缺失时按需远程拉取，并将增量写回本地（保证下次查询命中）；
+- 委托数据源做股票池 / 成分股 / 交易日历等元数据查询。
+
+写库由 :class:`DataUpdater` 负责，本类不再做全量 / 覆盖写。
 """
 
 from __future__ import annotations
@@ -9,9 +16,9 @@ from typing import Sequence
 
 import pandas as pd
 
-from stockquant.data.data_source import DataSourceFactory, BaseDataSource
-from stockquant.data.database import Database
+from stockquant.data.data_source import BaseDataSource, DataSourceFactory
 from stockquant.data.data_cleaner import DataCleaner
+from stockquant.data.database import Database
 from stockquant.utils.config import Config
 from stockquant.utils.helpers import ensure_date, normalize_stock_code
 from stockquant.utils.logger import get_logger
@@ -20,7 +27,7 @@ logger = get_logger("data.manager")
 
 
 class DataManager:
-    """高层数据管理器：采集 → 清洗 → 存储 → 查询。
+    """高层数据门面：本地查询 → 缺则远程拉取 → 写回本地。
 
     Parameters
     ----------
@@ -34,33 +41,27 @@ class DataManager:
         self.db.init_tables()
         self.cleaner = DataCleaner()
 
-        # 加载数据源适配器（导入时自动注册）
-        import stockquant.data.source_akshare  # noqa: F401
-        import stockquant.data.source_baostock  # noqa: F401
-
         primary = self.cfg.get("data_source.primary", "akshare")
         self._source: BaseDataSource = DataSourceFactory.create(primary)
-        logger.info(f"数据管理器初始化完成，主数据源: {primary}")
+        logger.info(f"DataManager 初始化，主数据源: {primary}")
 
     # ------------------------------------------------------------------
-    # 股票列表
+    # 股票列表 / 基本信息（只读）
     # ------------------------------------------------------------------
-
-    def update_stock_list(self) -> pd.DataFrame:
-        """更新 A 股股票列表到本地数据库。"""
-        df = self._source.get_stock_list()
-        if not df.empty:
-            self.db.save_dataframe(df, "stock_info", if_exists="replace")
-            logger.info(f"已更新股票列表: {len(df)} 只")
-        return df
 
     def get_stock_list(self) -> pd.DataFrame:
-        """获取本地股票列表。"""
-        if self.db.table_exists("stock_info"):
-            df = self.db.query("SELECT code, name FROM stock_info")
-            if not df.empty:
-                return df
-        return self.update_stock_list()
+        """获取本地股票列表（code, name）。
+
+        本地表为空时返回空 DataFrame —— 不再隐式触发写库，
+        请显式调用 ``DataUpdater.update_stock_info()`` 初始化数据。
+        """
+        if not self.db.table_exists("stock_info"):
+            logger.warning("stock_info 表不存在，请先运行 DataUpdater.update_stock_info()")
+            return pd.DataFrame(columns=["code", "name"])
+        df = self.db.query("SELECT code, name FROM stock_info")
+        if df.empty:
+            logger.warning("stock_info 表为空，请先运行 DataUpdater.update_stock_info()")
+        return df
 
     def get_stock_info(self, codes: Sequence[str] | None = None) -> pd.DataFrame:
         """获取股票基本信息（行业 / 市值等）。
@@ -68,25 +69,45 @@ class DataManager:
         Parameters
         ----------
         codes : list[str], optional
-            股票代码列表。若为 None 则返回全部。
+            股票代码列表。None 返回全部。
 
         Returns
         -------
         DataFrame
-            包含 code, name, industry, sector, market,
-            total_cap, float_cap 等列。
+            包含 code, name, industry, sector, market, total_cap, float_cap 等列。
         """
         if not self.db.table_exists("stock_info"):
-            self.update_stock_list()
+            logger.warning("stock_info 表不存在，请先运行 DataUpdater.update_stock_info()")
+            return pd.DataFrame()
 
-        sql = "SELECT * FROM stock_info"
         if codes:
-            placeholders = ", ".join(f"'{c}'" for c in codes)
-            sql += f" WHERE code IN ({placeholders})"
-        return self.db.query(sql)
+            placeholders = ", ".join("?" * len(codes))
+            return self.db.query(
+                f"SELECT * FROM stock_info WHERE code IN ({placeholders})",
+                [normalize_stock_code(c) for c in codes],
+            )
+        return self.db.query("SELECT * FROM stock_info")
+
+    def get_all_a_codes(self) -> list[str]:
+        """获取全部 A 股代码（优先本地 stock_info，缺失则走数据源）。"""
+        try:
+            df = self.get_stock_list()
+            if not df.empty:
+                return df["code"].astype(str).str.zfill(6).tolist()
+        except Exception as e:
+            logger.debug(f"本地股票列表查询失败: {e}")
+
+        df = self._source.get_stock_list()
+        if df.empty:
+            return []
+        return df["code"].astype(str).str.zfill(6).tolist()
+
+    def get_index_constituents(self, index_code: str) -> list[str]:
+        """获取指数成分股代码列表（透传到数据源）。"""
+        return self._source.get_index_constituents(index_code)
 
     # ------------------------------------------------------------------
-    # 日线数据
+    # 日线（本地优先 + 远程增量 write-back）
     # ------------------------------------------------------------------
 
     def fetch_daily(
@@ -96,38 +117,26 @@ class DataManager:
         end_date: str | dt.date | None = None,
         adjust: str | None = None,
     ) -> pd.DataFrame:
-        """获取日线数据（优先本地，缺失则远程拉取）。
-
-        Parameters
-        ----------
-        code : str
-            股票代码。
-        start_date / end_date : str | date, optional
-            起止日期，默认使用配置值。
-        adjust : str, optional
-            复权方式，默认使用配置值。
-        """
+        """获取日线数据：本地优先，缺失增量远程拉取并写回。"""
         code = normalize_stock_code(code)
         start_date = ensure_date(start_date or self.cfg.get("data_fetch.start_date", "2020-01-01"))
         end_date = ensure_date(end_date) or dt.date.today()
         adjust = adjust or self.cfg.get("data_fetch.adjust", "hfq")
 
-        # 尝试从本地读取
         local_df = self._load_local_daily(code, start_date, end_date)
         if not local_df.empty:
-            # 检查是否需要增量更新
-            latest = local_df["date"].max().date() if hasattr(local_df["date"].max(), "date") else local_df["date"].max()
-            if latest >= end_date:
+            latest = local_df["date"].max()
+            latest_date = latest.date() if hasattr(latest, "date") else latest
+            if latest_date >= end_date:
                 return local_df
-            # 增量拉取
-            next_day = latest + dt.timedelta(days=1)
-            new_df = self._fetch_remote_daily(code, next_day, end_date, adjust)
+
+            next_day = latest_date + dt.timedelta(days=1)
+            new_df = self._fetch_and_persist_daily(code, next_day, end_date, adjust)
             if not new_df.empty:
                 return pd.concat([local_df, new_df], ignore_index=True)
             return local_df
 
-        # 全量拉取
-        return self._fetch_remote_daily(code, start_date, end_date, adjust)
+        return self._fetch_and_persist_daily(code, start_date, end_date, adjust)
 
     def batch_fetch_daily(
         self,
@@ -136,20 +145,24 @@ class DataManager:
         end_date: str | dt.date | None = None,
         adjust: str | None = None,
     ) -> dict[str, pd.DataFrame]:
-        """批量获取多只股票的日线数据。"""
-        result = {}
+        """串行批量获取多只股票的日线数据。
+
+        大批量场景请使用 :class:`DataUpdater` 的并发更新接口。
+        """
+        result: dict[str, pd.DataFrame] = {}
         total = len(codes)
         for i, code in enumerate(codes, 1):
             logger.info(f"[{i}/{total}] 拉取 {code}")
             try:
-                df = self.fetch_daily(code, start_date, end_date, adjust)
-                result[normalize_stock_code(code)] = df
+                result[normalize_stock_code(code)] = self.fetch_daily(
+                    code, start_date, end_date, adjust,
+                )
             except Exception as e:
                 logger.error(f"拉取 {code} 失败: {e}")
         return result
 
     # ------------------------------------------------------------------
-    # 指数数据
+    # 指数日线（同样本地优先 + 写回）
     # ------------------------------------------------------------------
 
     def fetch_index_daily(
@@ -158,14 +171,13 @@ class DataManager:
         start_date: str | dt.date | None = None,
         end_date: str | dt.date | None = None,
     ) -> pd.DataFrame:
-        """获取指数日线数据。"""
         code = normalize_stock_code(code)
         start_date = ensure_date(start_date or self.cfg.get("data_fetch.start_date"))
         end_date = ensure_date(end_date) or dt.date.today()
 
         df = self._source.get_index_daily(code, start_date, end_date)
-        if not df.empty:
-            self.db.save_dataframe(df, "index_daily")
+        if not df.empty and self.db.table_exists("index_daily"):
+            self.db.insert_or_ignore(df, "index_daily")
         return df
 
     # ------------------------------------------------------------------
@@ -177,13 +189,12 @@ class DataManager:
         start_date: str | dt.date | None = None,
         end_date: str | dt.date | None = None,
     ) -> list[str]:
-        """获取交易日历。"""
         start_date = start_date or self.cfg.get("data_fetch.start_date")
         end_date = end_date or str(dt.date.today())
         return self._source.get_trade_dates(start_date, end_date)
 
     # ------------------------------------------------------------------
-    # 数据查询
+    # 直接查询
     # ------------------------------------------------------------------
 
     def query_daily(
@@ -195,7 +206,7 @@ class DataManager:
         """从本地数据库查询日线数据。"""
         code = normalize_stock_code(code)
         sql = "SELECT * FROM daily_bars WHERE code = ?"
-        params = [code]
+        params: list[object] = [code]
         if start_date:
             sql += " AND date >= ?"
             params.append(str(ensure_date(start_date)))
@@ -211,20 +222,24 @@ class DataManager:
 
     def _load_local_daily(self, code: str, start_date: dt.date, end_date: dt.date) -> pd.DataFrame:
         try:
+            if not self.db.table_exists("daily_bars"):
+                return pd.DataFrame()
             return self.query_daily(code, start_date, end_date)
         except Exception:
             return pd.DataFrame()
 
-    def _fetch_remote_daily(
+    def _fetch_and_persist_daily(
         self,
         code: str,
         start_date: dt.date,
         end_date: dt.date,
         adjust: str,
     ) -> pd.DataFrame:
+        """远程拉取 → 清洗 → 写回 daily_bars。"""
         df = self._source.get_daily_bars(code, start_date, end_date, adjust)
         if df.empty:
             return df
         df = self.cleaner.clean_pipeline(df)
-        self.db.save_dataframe(df, "daily_bars")
+        if self.db.table_exists("daily_bars"):
+            self.db.insert_or_ignore(df, "daily_bars")
         return df

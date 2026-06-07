@@ -3,6 +3,9 @@
 
 所有数据源适配器都继承 ``BaseDataSource`` 并实现统一接口，
 通过 ``DataSourceFactory`` 按配置名称获取对应实例。
+
+本模块同时提供 schema 标准化工具 ``standardize_daily`` / ``standardize_index``，
+各数据源适配器应在返回前统一经此函数收口，保证下游表结构一致。
 """
 
 from __future__ import annotations
@@ -15,6 +18,75 @@ import pandas as pd
 if TYPE_CHECKING:
     import datetime as dt
 
+
+# ======================================================================
+# 标准列定义（与 Database 表 schema 对齐）
+# ======================================================================
+
+DAILY_BAR_COLS: tuple[str, ...] = (
+    "code", "date", "open", "high", "low", "close",
+    "volume", "amount", "turnover", "pct_change", "change",
+)
+
+INDEX_DAILY_COLS: tuple[str, ...] = (
+    "code", "date", "open", "high", "low", "close", "volume", "amount",
+)
+
+# 中文 → 标准列名映射（AkShare 默认返回中文列）
+_CN_DAILY_RENAME = {
+    "日期": "date",
+    "开盘": "open",
+    "最高": "high",
+    "最低": "low",
+    "收盘": "close",
+    "成交量": "volume",
+    "成交额": "amount",
+    "换手率": "turnover",
+    "涨跌幅": "pct_change",
+    "涨跌额": "change",
+}
+
+# BaoStock 等英文返回值的映射（仅列出非标准的）
+_EN_DAILY_RENAME = {
+    "turn": "turnover",
+    "pctChg": "pct_change",
+}
+
+
+def standardize_daily(df: pd.DataFrame, code: str) -> pd.DataFrame:
+    """统一日线 DataFrame schema，输出列与 daily_bars 表对齐。
+
+    支持输入为中文列名（AkShare）或英文列名（BaoStock / 新浪）。
+    多余列被丢弃，缺失列保留为空。
+    """
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    df = df.rename(columns={**_CN_DAILY_RENAME, **_EN_DAILY_RENAME})
+    df["code"] = code
+    if "date" in df.columns:
+        df["date"] = pd.to_datetime(df["date"])
+    return df.reindex(columns=list(DAILY_BAR_COLS))
+
+
+def standardize_index(df: pd.DataFrame, code: str) -> pd.DataFrame:
+    """统一指数日线 DataFrame schema，输出列与 index_daily 表对齐。
+
+    多余列被丢弃，缺失列保留为空。
+    """
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    df = df.rename(columns={**_CN_DAILY_RENAME, **_EN_DAILY_RENAME})
+    df["code"] = code
+    if "date" in df.columns:
+        df["date"] = pd.to_datetime(df["date"])
+    return df.reindex(columns=list(INDEX_DAILY_COLS))
+
+
+# ======================================================================
+# 抽象基类
+# ======================================================================
 
 class BaseDataSource(ABC):
     """数据源抽象基类。"""
@@ -51,7 +123,7 @@ class BaseDataSource(ABC):
         Returns
         -------
         DataFrame
-            标准列: date, open, high, low, close, volume, amount, turnover
+            标准列见 :data:`DAILY_BAR_COLS`。
         """
 
     @abstractmethod
@@ -61,7 +133,17 @@ class BaseDataSource(ABC):
         start_date: str | dt.date,
         end_date: str | dt.date,
     ) -> pd.DataFrame:
-        """获取指数日线行情。"""
+        """获取指数日线行情。
+
+        Returns
+        -------
+        DataFrame
+            标准列见 :data:`INDEX_DAILY_COLS`。
+        """
+
+    @abstractmethod
+    def get_index_constituents(self, index_code: str) -> list[str]:
+        """获取指数成分股代码列表（纯 6 位数字、去重）。"""
 
     @abstractmethod
     def get_finance_data(self, code: str) -> pd.DataFrame:
@@ -87,10 +169,15 @@ class BaseDataSource(ABC):
         """获取区间内交易日历。"""
 
 
+# ======================================================================
+# 工厂
+# ======================================================================
+
 class DataSourceFactory:
-    """数据源工厂 — 根据名称返回对应数据源实例。"""
+    """数据源工厂 — 根据名称返回对应数据源实例（按名称缓存）。"""
 
     _registry: dict[str, type[BaseDataSource]] = {}
+    _instances: dict[str, BaseDataSource] = {}
 
     @classmethod
     def register(cls, name: str, source_cls: type[BaseDataSource]) -> None:
@@ -103,4 +190,11 @@ class DataSourceFactory:
             raise ValueError(
                 f"未注册的数据源: {name}，可用: {list(cls._registry.keys())}"
             )
-        return cls._registry[name]()
+        if name not in cls._instances:
+            cls._instances[name] = cls._registry[name]()
+        return cls._instances[name]
+
+    @classmethod
+    def reset_instances(cls) -> None:
+        """清空实例缓存（测试用）。"""
+        cls._instances.clear()

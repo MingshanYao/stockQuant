@@ -12,7 +12,13 @@ import akshare as ak
 import pandas as pd
 import numpy as np
 
-from stockquant.data.data_source import BaseDataSource, DataSourceFactory
+from stockquant.data.data_source import (
+    BaseDataSource,
+    DAILY_BAR_COLS,
+    DataSourceFactory,
+    standardize_daily,
+    standardize_index,
+)
 from stockquant.utils.concurrent import parallel_fetch_serial_consume
 from stockquant.utils.helpers import (
     call_with_retries,
@@ -114,7 +120,7 @@ class AkShareDataSource(BaseDataSource):
             )
             if raw is None or raw.empty:
                 return pd.DataFrame()
-            return self._standardize_daily(raw, code)
+            return standardize_daily(raw, code)
 
         raw = ak.stock_zh_a_hist(
             symbol=code, period="daily",
@@ -127,8 +133,8 @@ class AkShareDataSource(BaseDataSource):
         if adj is None or adj.empty:
             return pd.DataFrame()
 
-        df_raw = self._standardize_daily(raw, code) if (raw is not None and not raw.empty) else pd.DataFrame()
-        df_adj = self._standardize_daily(adj, code)
+        df_raw = standardize_daily(raw, code) if (raw is not None and not raw.empty) else pd.DataFrame()
+        df_adj = standardize_daily(adj, code)
         if df_raw.empty:
             return df_adj
         return self._compute_adjusted_volume(code, df_raw, df_adj)
@@ -161,16 +167,9 @@ class AkShareDataSource(BaseDataSource):
             return pd.DataFrame()
 
         df = df.copy()
-        df["date"] = pd.to_datetime(df["date"])
-        df["code"] = code
         df["pct_change"] = df["close"].pct_change()
         df["change"] = df["close"].diff()
-        # 对齐 daily_bars 表 schema
-        standard_cols = [
-            "code", "date", "open", "high", "low", "close",
-            "volume", "amount", "turnover", "pct_change", "change",
-        ]
-        return df[[c for c in standard_cols if c in df.columns]]
+        return standardize_daily(df, code)
 
     # ------------------------------------------------------------------
     # 指数日线
@@ -193,9 +192,7 @@ class AkShareDataSource(BaseDataSource):
                 symbol=code, period="daily",
                 start_date=start_str, end_date=end_str,
             )
-            if df is None or df.empty:
-                return pd.DataFrame()
-            return self._standardize_index(df, code)
+            return standardize_index(df, code)
 
         try:
             df = call_with_retries(_primary, attempts=2, delay=0.5, label=f"index_zh_a_hist {code}")
@@ -217,7 +214,7 @@ class AkShareDataSource(BaseDataSource):
             sd_ts = pd.Timestamp(ensure_date(start_date))
             ed_ts = pd.Timestamp(ensure_date(end_date))
             df = df[(df["date"] >= sd_ts) & (df["date"] <= ed_ts)]
-            return self._standardize_index(df, code)
+            return standardize_index(df, code)
 
         try:
             df = call_with_retries(_fallback, attempts=2, delay=0.5, label=f"stock_zh_index_daily {code}")
@@ -227,6 +224,44 @@ class AkShareDataSource(BaseDataSource):
             logger.error(f"获取指数 {code} 日线失败: {e}")
 
         return pd.DataFrame()
+
+    # ------------------------------------------------------------------
+    # 指数成分股
+    # ------------------------------------------------------------------
+    def get_index_constituents(self, index_code: str) -> list[str]:
+        """获取指数成分股代码列表（去重，6 位纯数字）。
+
+        首选 ``ak.index_stock_cons``；失败/为空时回退 ``ak.index_stock_cons_csindex``。
+        两者均失败返回空列表。
+        """
+        index_code = normalize_stock_code(index_code)
+        logger.info(f"获取指数 {index_code} 成分股")
+
+        try:
+            df = call_with_retries(
+                lambda: ak.index_stock_cons(symbol=index_code),
+                attempts=2, delay=0.5,
+                label=f"index_stock_cons {index_code}",
+            )
+            if df is not None and not df.empty:
+                col = "品种代码" if "品种代码" in df.columns else df.columns[0]
+                codes = df[col].astype(str).str.zfill(6).drop_duplicates().tolist()
+                logger.info(f"指数 {index_code} 成分股: {len(codes)} 只")
+                return codes
+        except Exception as e:
+            logger.debug(f"index_stock_cons({index_code}) 失败: {e}")
+
+        try:
+            df = ak.index_stock_cons_csindex(symbol=index_code)
+            if df is not None and not df.empty:
+                col = "成分券代码" if "成分券代码" in df.columns else df.columns[0]
+                codes = df[col].astype(str).str.zfill(6).drop_duplicates().tolist()
+                logger.info(f"指数 {index_code} 成分股: {len(codes)} 只（csindex）")
+                return codes
+        except Exception as e:
+            logger.error(f"获取指数 {index_code} 成分股失败: {e}")
+
+        return []
 
     # ------------------------------------------------------------------
     # 基本财务
@@ -403,61 +438,6 @@ class AkShareDataSource(BaseDataSource):
         )
         return code_to_industry
 
-    # ------------------------------------------------------------------
-    # 内部：列名标准化
-    # ------------------------------------------------------------------
-    @staticmethod
-    def _standardize_daily(df: pd.DataFrame, code: str) -> pd.DataFrame:
-        col_map = {
-            "日期": "date",
-            "开盘": "open",
-            "最高": "high",
-            "最低": "low",
-            "收盘": "close",
-            "成交量": "volume",
-            "成交额": "amount",
-            "换手率": "turnover",
-            "涨跌幅": "pct_change",
-            "涨跌额": "change",
-        }
-        df = df.rename(columns=col_map)
-        df["code"] = code
-        if "date" in df.columns:
-            df["date"] = pd.to_datetime(df["date"])
-        # 只保留数据库 daily_bars 表中定义的列，丢弃多余列（如 股票代码、振幅）
-        standard_cols = [
-            "code", "date", "open", "high", "low", "close",
-            "volume", "amount", "turnover", "pct_change", "change",
-        ]
-        df = df[[c for c in standard_cols if c in df.columns]]
-        return df
-
-    @staticmethod
-    def _standardize_index(df: pd.DataFrame, code: str) -> pd.DataFrame:
-        """标准化指数日线 DataFrame，输出列与 index_daily 表对齐。"""
-        df = df.copy()
-
-        # index_zh_a_hist 返回中文列名，stock_zh_index_daily 返回英文列名
-        col_map = {
-            "日期": "date",
-            "开盘": "open",
-            "收盘": "close",
-            "最高": "high",
-            "最低": "low",
-            "成交量": "volume",
-            "成交额": "amount",
-        }
-        df = df.rename(columns=col_map)
-
-        df["code"] = code
-        if "date" in df.columns:
-            df["date"] = pd.to_datetime(df["date"])
-
-        # 只保留 index_daily 表定义的列
-        standard_cols = ["code", "date", "open", "high", "low", "close", "volume", "amount"]
-        df = df[[c for c in standard_cols if c in df.columns]]
-        return df
-
     def _compute_adjusted_volume(
         self,
         code: str,
@@ -593,11 +573,7 @@ class AkShareDataSource(BaseDataSource):
             )
 
         # ---- 6. 输出标准列 ----
-        standard_cols = [
-            "code", "date", "open", "high", "low", "close",
-            "volume", "amount", "turnover", "pct_change", "change",
-        ]
-        return merged[[c for c in standard_cols if c in merged.columns]]
+        return merged[[c for c in DAILY_BAR_COLS if c in merged.columns]]
 
 
 # 注册到工厂

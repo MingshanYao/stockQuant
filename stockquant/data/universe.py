@@ -39,7 +39,6 @@ import dataclasses
 from enum import Enum
 from typing import TYPE_CHECKING, Optional, Sequence
 
-import akshare as ak
 import pandas as pd
 
 from stockquant.utils.helpers import normalize_stock_code
@@ -174,7 +173,7 @@ class BacktestDataset:
     def summary(self) -> str:
         """返回友好的数据集摘要字符串。"""
         lines = [
-            f"📊 回测数据集摘要",
+            f"回测数据集摘要",
             f"   标的数量: {len(self.codes)} 只"
             f"（共请求 {len(self.codes) + len(self.missing_codes)} 只）",
             f"   日期范围: {self.start_date} ~ {self.end_date}",
@@ -185,7 +184,7 @@ class BacktestDataset:
             bars = sum(len(df) for df in self.stock_data.values())
             lines.append(f"   日线总条数: {bars:,}")
         if self.missing_codes:
-            lines.append(f"   ⚠️ 缺失数据: {self.missing_codes}")
+            lines.append(f"   缺失数据: {self.missing_codes}")
         return "\n".join(lines)
 
 
@@ -392,7 +391,7 @@ class StockUniverse:
             df = self._dm.fetch_daily(code, start_date=start_date, end_date=end_date)
             if df.empty:
                 missing.append(code)
-                logger.warning(f"[{i}/{total}] ⚠️  {code} 无数据")
+                logger.warning(f"[{i}/{total}] {code} 无数据")
             else:
                 df = df.copy()
                 df["date"] = pd.to_datetime(df["date"])
@@ -400,7 +399,7 @@ class StockUniverse:
                 date_min = df["date"].min().date()
                 date_max = df["date"].max().date()
                 logger.debug(
-                    f"[{i}/{total}] ✅ {code}: {len(df)} bars"
+                    f"[{i}/{total}] {code}: {len(df)} bars"
                     f" [{date_min} ~ {date_max}]"
                 )
 
@@ -470,55 +469,12 @@ class StockUniverse:
     # ------------------------------------------------------------------
 
     def _get_all_a_codes(self) -> list[str]:
-        """获取全部 A 股代码，优先本地 stock_info 表。"""
-        try:
-            df = self._dm.get_stock_list()
-            if not df.empty:
-                codes = df["code"].astype(str).str.zfill(6).tolist()
-                logger.info(f"全部 A 股: {len(codes)} 只（本地）")
-                return codes
-        except Exception:
-            pass
+        """获取全部 A 股代码（委托给 DataManager）。"""
+        return self._dm.get_all_a_codes()
 
-        # fallback: AkShare
-        try:
-            df = ak.stock_info_a_code_name()
-            df.columns = ["code", "name"]
-            codes = df["code"].astype(str).str.zfill(6).tolist()
-            logger.info(f"全部 A 股: {len(codes)} 只（远程）")
-            return codes
-        except Exception as e:
-            logger.error(f"获取全部 A 股失败: {e}")
-            return []
-
-    @staticmethod
-    def _get_index_constituents(index_code: str) -> list[str]:
-        """获取指数成分股代码列表（AkShare）。"""
-        logger.info(f"获取指数 {index_code} 成分股")
-
-        # 首选 index_stock_cons
-        try:
-            df = ak.index_stock_cons(symbol=index_code)
-            if df is not None and not df.empty:
-                col = "品种代码" if "品种代码" in df.columns else df.columns[0]
-                codes = df[col].astype(str).str.zfill(6).drop_duplicates().tolist()
-                logger.info(f"指数 {index_code} 成分股: {len(codes)} 只")
-                return codes
-        except Exception as e:
-            logger.debug(f"index_stock_cons({index_code}) 失败: {e}")
-
-        # 备用 index_stock_cons_csindex
-        try:
-            df = ak.index_stock_cons_csindex(symbol=index_code)
-            if df is not None and not df.empty:
-                col = "成分券代码" if "成分券代码" in df.columns else df.columns[0]
-                codes = df[col].astype(str).str.zfill(6).drop_duplicates().tolist()
-                logger.info(f"指数 {index_code} 成分股: {len(codes)} 只（csindex）")
-                return codes
-        except Exception as e:
-            logger.error(f"获取指数 {index_code} 成分股失败: {e}")
-
-        return []
+    def _get_index_constituents(self, index_code: str) -> list[str]:
+        """获取指数成分股代码列表（委托给 DataManager）。"""
+        return self._dm.get_index_constituents(index_code)
 
     def _get_codes_by_prefix(self, prefixes: tuple[str, ...]) -> list[str]:
         """从全部 A 股中按代码前缀筛选。"""

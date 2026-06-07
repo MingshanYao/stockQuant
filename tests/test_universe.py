@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pandas as pd
 import pytest
@@ -43,15 +43,13 @@ _FAKE_ALL_A = pd.DataFrame({
     ],
 })
 
-_FAKE_CSI300 = pd.DataFrame({
-    "品种代码": ["600000", "000001", "600036", "300059", "688001"],
-    "品种名称": ["浦发银行", "平安银行", "招商银行", "东方财富", "华兴源创"],
-})
+_CSI300_CODES = ["600000", "000001", "600036", "300059", "688001"]
+_CSI500_CODES = ["601318", "000002", "002230"]
 
-_FAKE_CSI500 = pd.DataFrame({
-    "品种代码": ["601318", "000002", "002230"],
-    "品种名称": ["中国平安", "万科A",   "科大讯飞"],
-})
+_INDEX_CONSTITUENTS = {
+    "000300": _CSI300_CODES,
+    "000905": _CSI500_CODES,
+}
 
 
 def _make_daily(code: str, n: int = 5) -> pd.DataFrame:
@@ -67,6 +65,14 @@ def _make_daily(code: str, n: int = 5) -> pd.DataFrame:
 def _make_mock_dm(valid_codes: list[str] | None = None) -> MagicMock:
     dm = MagicMock()
     dm.get_stock_list.return_value = _FAKE_ALL_A[["code", "name"]].copy()
+    dm.get_all_a_codes.return_value = _FAKE_ALL_A["code"].astype(str).tolist()
+
+    def _index_cons(index_code):
+        if index_code not in _INDEX_CONSTITUENTS:
+            raise ValueError(f"unknown index {index_code}")
+        return list(_INDEX_CONSTITUENTS[index_code])
+
+    dm.get_index_constituents.side_effect = _index_cons
 
     valid = set(valid_codes) if valid_codes else set(_FAKE_ALL_A["code"])
 
@@ -154,9 +160,7 @@ class TestScopeSinglePool:
         codes = StockUniverse(dm=dm).scope(Pool.SZ_MAIN).codes()
         assert set(codes) == {"000001", "000002", "002230"}
 
-    @patch("stockquant.data.universe.ak")
-    def test_scope_csi300(self, mock_ak):
-        mock_ak.index_stock_cons.return_value = _FAKE_CSI300.copy()
+    def test_scope_csi300(self):
         dm = _make_mock_dm()
         codes = StockUniverse(dm=dm).scope(Pool.CSI300).codes()
         assert len(codes) == 5
@@ -168,19 +172,9 @@ class TestScopeSinglePool:
 
 class TestScopeUnion:
 
-    @patch("stockquant.data.universe.ak")
-    def test_union_two_indexes(self, mock_ak):
+    def test_union_two_indexes(self):
         """沪深300 ∪ 中证500 → 去重并集。"""
-        def _index_cons(symbol):
-            if symbol == "000300":
-                return _FAKE_CSI300.copy()
-            if symbol == "000905":
-                return _FAKE_CSI500.copy()
-            raise ValueError(f"unknown index {symbol}")
-
-        mock_ak.index_stock_cons.side_effect = _index_cons
         dm = _make_mock_dm()
-
         codes = StockUniverse(dm=dm).scope(Pool.CSI300, Pool.CSI500).codes()
         # CSI300: 600000, 000001, 600036, 300059, 688001
         # CSI500: 601318, 000002, 002230
@@ -244,9 +238,7 @@ class TestScopeCodeList:
 
 class TestExcludePool:
 
-    @patch("stockquant.data.universe.ak")
-    def test_exclude_board_from_index(self, mock_ak):
-        mock_ak.index_stock_cons.return_value = _FAKE_CSI300.copy()
+    def test_exclude_board_from_index(self):
         dm = _make_mock_dm()
         codes = (
             StockUniverse(dm=dm)
@@ -257,9 +249,7 @@ class TestExcludePool:
         assert "688001" not in codes
         assert "600000" in codes
 
-    @patch("stockquant.data.universe.ak")
-    def test_exclude_multiple_boards(self, mock_ak):
-        mock_ak.index_stock_cons.return_value = _FAKE_CSI300.copy()
+    def test_exclude_multiple_boards(self):
         dm = _make_mock_dm()
         codes = (
             StockUniverse(dm=dm)
@@ -281,10 +271,8 @@ class TestExcludePool:
         )
         assert set(codes) == {"600000", "600036", "601318", "000001", "000002", "002230"}
 
-    @patch("stockquant.data.universe.ak")
-    def test_exclude_index_pool(self, mock_ak):
+    def test_exclude_index_pool(self):
         """排除一个指数成分股（如排除沪深300的全部成分股）。"""
-        mock_ak.index_stock_cons.return_value = _FAKE_CSI300.copy()
         dm = _make_mock_dm()
         codes = (
             StockUniverse(dm=dm)
@@ -344,9 +332,7 @@ class TestExcludeCode:
 
 class TestExcludeMixed:
 
-    @patch("stockquant.data.universe.ak")
-    def test_exclude_pool_and_codes(self, mock_ak):
-        mock_ak.index_stock_cons.return_value = _FAKE_CSI300.copy()
+    def test_exclude_pool_and_codes(self):
         dm = _make_mock_dm()
         codes = (
             StockUniverse(dm=dm)

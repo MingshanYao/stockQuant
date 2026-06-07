@@ -39,7 +39,6 @@ import datetime as dt
 import sys
 from typing import Sequence
 
-import akshare as ak
 import pandas as pd
 
 from stockquant.data.data_cleaner import DataCleaner
@@ -99,40 +98,6 @@ def filter_codes(
     return result
 
 
-def get_index_constituents(index_code: str) -> list[str]:
-    """获取指数成分股代码列表。"""
-    index_code = normalize_stock_code(index_code)
-    logger.info(f"获取指数 {index_code} 成分股列表")
-    try:
-        df = call_with_retries(
-            lambda: ak.index_stock_cons(symbol=index_code),
-            label=f"index_stock_cons {index_code}",
-        )
-        codes = df["品种代码"].astype(str).str.zfill(6).drop_duplicates().tolist()
-        logger.info(f"指数 {index_code} 成分股: {len(codes)} 只")
-        return codes
-    except Exception as e:
-        logger.error(f"获取指数 {index_code} 成分股失败: {e}")
-        return []
-
-
-def get_all_a_codes() -> list[str]:
-    """获取全部 A 股代码列表。"""
-    logger.info("获取全部 A 股代码列表")
-    try:
-        df = call_with_retries(
-            ak.stock_info_a_code_name,
-            label="stock_info_a_code_name",
-        )
-        df.columns = ["code", "name"]
-        codes = df["code"].astype(str).str.zfill(6).tolist()
-        logger.info(f"全部 A 股: {len(codes)} 只")
-        return codes
-    except Exception as e:
-        logger.error(f"获取 A 股列表失败: {e}")
-        return []
-
-
 # ======================================================================
 # DataUpdater
 # ======================================================================
@@ -158,12 +123,11 @@ class DataUpdater:
         self.db.init_tables()
         self.cleaner = DataCleaner()
 
-        import stockquant.data.source_akshare  # noqa: F401
         primary = self.cfg.get("data_source.primary", "akshare")
         self._source: BaseDataSource = DataSourceFactory.create(primary)
 
     # ------------------------------------------------------------------
-    # 核心公开接口（4 个）
+    # 核心公开接口
     # ------------------------------------------------------------------
 
     def update_all_daily(
@@ -176,23 +140,8 @@ class DataUpdater:
         include_bse: bool = True,
         include_gem: bool = True,
     ) -> dict[str, int]:
-        """更新全部 A 股日线数据。
-
-        Parameters
-        ----------
-        start_date / end_date : str | date, optional
-            起止日期，默认增量更新。
-        adjust : str, optional
-            复权方式，默认读取配置（hfq）。
-        include_star / include_bse / include_gem : bool
-            是否包含科创板 / 北交所 / 创业板，默认全部包含。
-
-        Returns
-        -------
-        dict[str, int]
-            {code: 写入行数}。
-        """
-        codes = get_all_a_codes()
+        """更新全部 A 股日线数据。"""
+        codes = self._get_all_a_codes()
         codes = filter_codes(
             codes,
             include_star=include_star,
@@ -216,24 +165,8 @@ class DataUpdater:
         include_bse: bool = True,
         include_gem: bool = True,
     ) -> dict[str, int]:
-        """更新某个指数成分股的日线数据。
-
-        Parameters
-        ----------
-        index_code : str
-            指数代码，默认沪深300。支持常见代码::
-
-                000300 — 沪深300
-                000905 — 中证500
-                000852 — 中证1000
-                932000 — 中证2000
-
-        Returns
-        -------
-        dict[str, int]
-            {code: 写入行数}。
-        """
-        codes = get_index_constituents(index_code)
+        """更新某个指数成分股的日线数据。"""
+        codes = self._source.get_index_constituents(index_code)
         codes = filter_codes(
             codes,
             include_star=include_star,
@@ -253,18 +186,7 @@ class DataUpdater:
         end_date: str | dt.date | None = None,
         adjust: str | None = None,
     ) -> dict[str, int]:
-        """更新指定代码列表的日线数据。
-
-        Parameters
-        ----------
-        codes : list[str]
-            股票代码列表。
-
-        Returns
-        -------
-        dict[str, int]
-            {code: 写入行数}。
-        """
+        """更新指定代码列表的日线数据。"""
         codes = [normalize_stock_code(c) for c in codes]
         logger.info(f"更新自定义列表日线: {len(codes)} 只")
         return self._batch_update(list(codes), start_date, end_date, adjust)
@@ -275,20 +197,7 @@ class DataUpdater:
         start_date: str | dt.date | None = None,
         end_date: str | dt.date | None = None,
     ) -> dict[str, int]:
-        """更新 Benchmark 指数自身的日线行情（写入 index_daily 表）。
-
-        用于回测时的基准对比。
-
-        Parameters
-        ----------
-        index_codes : list[str], optional
-            要更新的指数代码，默认沪深300 / 中证500 / 1000 / 2000。
-
-        Returns
-        -------
-        dict[str, int]
-            {指数代码: 写入行数}。
-        """
+        """更新 Benchmark 指数自身的日线行情（写入 index_daily 表）。"""
         if index_codes is None:
             index_codes = list(BENCHMARK_INDICES.keys())
 
@@ -306,15 +215,16 @@ class DataUpdater:
                     continue
 
                 logger.info(f"拉取指数 {label}({code}) 日线 [{sd} ~ {end_date}]")
-                df = _call_with_retries(
-                    lambda c=code, s=sd, e=end_date: self._source.get_index_daily(c, s, e)
+                df = call_with_retries(
+                    lambda c=code, s=sd, e=end_date: self._source.get_index_daily(c, s, e),
+                    label=f"index_daily {code}",
                 )
                 if df is None or df.empty:
                     logger.warning(f"指数 {label}({code}) 返回空数据")
                     results[code] = 0
                     continue
 
-                rows = self.db.save_dataframe(df, "index_daily")
+                rows = self.db.insert_or_ignore(df, "index_daily")
                 results[code] = rows
                 logger.info(f"指数 {label}({code}) 写入 {rows} 行")
             except Exception as e:
@@ -330,17 +240,14 @@ class DataUpdater:
     def update_stock_info(self) -> int:
         """更新全市场股票基本信息（行业/市值等），写入 stock_info 表。
 
-        数据源通过 ``get_stock_info()`` 一次性获取全市场快照，
-        包含 code, name, industry, sector, market, total_cap, float_cap 等。
-
-        Returns
-        -------
-        int
-            写入行数。
+        全量替换：每次更新是当前时刻的快照，退市代码会被清理。
         """
         logger.info("开始更新股票基本信息")
         try:
-            df = _call_with_retries(self._source.get_stock_info)
+            df = call_with_retries(
+                self._source.get_stock_info,
+                label="source.get_stock_info",
+            )
         except Exception as e:
             logger.error(f"获取股票基本信息失败: {e}")
             return 0
@@ -349,23 +256,41 @@ class DataUpdater:
             logger.warning("股票基本信息返回空数据")
             return 0
 
-        # 清洗字段类型，避免写入时 DuckDB 类型转换错误
         if "list_date" in df.columns:
             df["list_date"] = pd.to_datetime(df["list_date"], errors="coerce").dt.date
         for col in ("total_shares", "float_shares", "total_cap", "float_cap"):
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
 
-        # 全量替换：每次更新是当前时刻的快照
+        df["updated_at"] = pd.Timestamp.now()
         try:
-            self.db.execute("DELETE FROM stock_info")
-            df["updated_at"] = pd.Timestamp.now()
-            rows = self.db.save_dataframe(df, "stock_info")
+            self.db.truncate("stock_info")
+            rows = self.db.insert_or_ignore(df, "stock_info")
             logger.info(f"股票基本信息更新完成: {rows} 只")
             return rows
         except Exception as e:
             logger.error(f"写入股票基本信息失败: {e}")
             return 0
+
+    # ------------------------------------------------------------------
+    # 内部：代码列表
+    # ------------------------------------------------------------------
+
+    def _get_all_a_codes(self) -> list[str]:
+        """获取全部 A 股代码（走数据源的 get_stock_list）。"""
+        try:
+            df = call_with_retries(
+                self._source.get_stock_list,
+                label="source.get_stock_list",
+            )
+        except Exception as e:
+            logger.error(f"获取 A 股列表失败: {e}")
+            return []
+        if df.empty:
+            return []
+        codes = df["code"].astype(str).str.zfill(6).tolist()
+        logger.info(f"全部 A 股: {len(codes)} 只")
+        return codes
 
     # ------------------------------------------------------------------
     # 内部：日期决策
@@ -444,7 +369,7 @@ class DataUpdater:
                 return
             try:
                 df = self.cleaner.clean_pipeline(df)
-                rows = self.db.save_dataframe(df, "daily_bars")
+                rows = self.db.insert_or_ignore(df, "daily_bars")
                 results[code] = rows
             except Exception as e:
                 failed.append(code)
@@ -588,4 +513,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

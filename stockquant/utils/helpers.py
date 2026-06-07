@@ -111,6 +111,8 @@ def call_with_retries(
     for i in range(1, attempts + 1):
         try:
             return fn()
+        except NotImplementedError:
+            raise
         except Exception as e:
             last_exc = e
             if on_error is not None:

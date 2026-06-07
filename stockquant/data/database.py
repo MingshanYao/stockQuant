@@ -137,50 +137,64 @@ class Database:
             logger.warning(f"stock_info 列检查/追加失败: {e}")
 
     # ------------------------------------------------------------------
-    # CRUD
+    # 写入：三种明确语义
     # ------------------------------------------------------------------
 
-    def save_dataframe(
-        self,
-        df: pd.DataFrame,
-        table: str,
-        if_exists: str = "append",
-    ) -> int:
-        """将 DataFrame 写入指定表。
-
-        Parameters
-        ----------
-        df : DataFrame
-            待写入数据。
-        table : str
-            目标表名。
-        if_exists : str
-            冲突处理: ``append`` 追加（跳过重复）/ ``replace`` 替换。
-
-        Returns
-        -------
-        int
-            写入行数。
-        """
-        if df.empty:
+    def insert_or_ignore(self, df: pd.DataFrame, table: str) -> int:
+        """INSERT OR IGNORE：主键冲突静默跳过，返回真实新增行数。"""
+        if df is None or df.empty:
             return 0
 
-        if if_exists == "replace":
-            self.conn.execute(f"DELETE FROM {table}")
-
-        # 使用临时表做 INSERT OR IGNORE（显式列名，避免列顺序不一致）
+        before = self._row_count(table)
         tmp = f"_tmp_{table}"
         self.conn.register(tmp, df)
         cols = ", ".join(df.columns)
-        self.conn.execute(f"""
-            INSERT OR IGNORE INTO {table} ({cols})
-            SELECT {cols} FROM {tmp}
-        """)
-        self.conn.unregister(tmp)
+        try:
+            self.conn.execute(
+                f"INSERT OR IGNORE INTO {table} ({cols}) SELECT {cols} FROM {tmp}"
+            )
+        finally:
+            self.conn.unregister(tmp)
+        inserted = self._row_count(table) - before
+        logger.debug(f"insert_or_ignore {table}: 提交 {len(df)} 行，新增 {inserted} 行")
+        return inserted
 
-        row_count = len(df)
-        logger.debug(f"写入 {table}: {row_count} 行")
-        return row_count
+    def upsert(self, df: pd.DataFrame, table: str) -> int:
+        """INSERT OR REPLACE：按主键合并，返回提交行数。
+
+        要求表已声明 PRIMARY KEY。
+        """
+        if df is None or df.empty:
+            return 0
+
+        tmp = f"_tmp_{table}"
+        self.conn.register(tmp, df)
+        cols = ", ".join(df.columns)
+        try:
+            self.conn.execute(
+                f"INSERT OR REPLACE INTO {table} ({cols}) SELECT {cols} FROM {tmp}"
+            )
+        finally:
+            self.conn.unregister(tmp)
+        logger.debug(f"upsert {table}: 提交 {len(df)} 行")
+        return len(df)
+
+    def truncate(self, table: str) -> None:
+        """清空表所有行。"""
+        self.conn.execute(f"DELETE FROM {table}")
+        logger.info(f"truncate {table}")
+
+    def save_dataframe(self, df: pd.DataFrame, table: str) -> int:
+        """兼容旧接口 —— 等同于 :meth:`insert_or_ignore`。
+
+        新代码请直接使用 :meth:`insert_or_ignore` / :meth:`upsert` / :meth:`truncate`，
+        语义更清晰。
+        """
+        return self.insert_or_ignore(df, table)
+
+    # ------------------------------------------------------------------
+    # 查询
+    # ------------------------------------------------------------------
 
     def query(self, sql: str, params: list[Any] | None = None) -> pd.DataFrame:
         """执行 SQL 查询并返回 DataFrame。"""
@@ -213,11 +227,12 @@ class Database:
         except Exception:
             return None
 
+    def _row_count(self, table: str) -> int:
+        row = self.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
+        return int(row[0]) if row else 0
+
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self.close()
-
-    def __del__(self):
         self.close()
