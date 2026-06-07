@@ -21,8 +21,8 @@ class TestIndicatorRegistry:
 
     def test_list_all_indicators(self):
         names = IndicatorRegistry.list()
-        assert len(names) == 5
-        assert set(names) == {"trend", "oscillator", "volume", "volatility", "alpha101"}
+        assert len(names) == 6
+        assert set(names) == {"trend", "oscillator", "volume", "volatility", "alpha101", "alpha191"}
 
     def test_create_by_name(self):
         trend = IndicatorRegistry.create("trend")

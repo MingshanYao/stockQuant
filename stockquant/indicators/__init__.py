@@ -6,6 +6,7 @@ from .oscillator import OscillatorIndicators
 from .volume import VolumeIndicators
 from .volatility import VolatilityIndicators
 from .alpha101 import Alpha101Indicators
+from .alpha191 import Alpha191Indicators
 
 __all__ = [
     "BaseIndicator",
@@ -15,4 +16,5 @@ __all__ = [
     "VolumeIndicators",
     "VolatilityIndicators",
     "Alpha101Indicators",
+    "Alpha191Indicators",
 ]
