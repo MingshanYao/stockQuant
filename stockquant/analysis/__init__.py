@@ -2,5 +2,6 @@
 
 from .performance import PerformanceAnalyzer
 from .factor import FactorAnalyzer
+from .evaluator import FactorEvaluator
 
-__all__ = ["PerformanceAnalyzer", "FactorAnalyzer"]
+__all__ = ["PerformanceAnalyzer", "FactorAnalyzer", "FactorEvaluator"]

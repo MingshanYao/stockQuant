@@ -76,6 +76,33 @@ class FactorAnalyzer:
             return 0.0
         return float(ic_series.mean() / ic_series.std())
 
+    @staticmethod
+    def calc_factor_return(
+        factor: pd.Series,
+        forward_returns: pd.Series,
+    ) -> float:
+        """截面回归因子收益率。
+
+        对因子值标准化后，用 OLS 回归未来收益，回归系数即为因子收益率。
+        """
+        valid = pd.concat(
+            [factor.rename("f"), forward_returns.rename("r")], axis=1
+        ).dropna()
+        if len(valid) < 10:
+            return 0.0
+
+        f = valid["f"].values
+        r = valid["r"].values
+
+        f_std = f.std()
+        if f_std == 0:
+            return 0.0
+        f_norm = (f - f.mean()) / f_std
+
+        X = np.column_stack([f_norm, np.ones(len(f_norm))])
+        beta = np.linalg.lstsq(X, r, rcond=None)[0]
+        return float(beta[0])
+
     # ------------------------------------------------------------------
     # 分组回测
     # ------------------------------------------------------------------

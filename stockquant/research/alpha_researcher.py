@@ -431,6 +431,58 @@ class AlphaResearcher:
         return df
 
     # ==================================================================
+    # 因子评价（FactorEvaluator 集成）
+    # ==================================================================
+
+    def evaluate_factor(
+        self,
+        factor_panel: pd.DataFrame,
+        forward_period: int = 1,
+        neutralize: bool = False,
+        **kwargs,
+    ) -> dict[str, float]:
+        """使用 FactorEvaluator 对因子面板做完整评价。
+
+        Parameters
+        ----------
+        factor_panel : DataFrame
+            因子面板（行=日期，列=股票代码）。
+        forward_period : int
+            前向收益天数，默认 1。
+        neutralize : bool
+            是否做风格正交化，默认 False。
+
+        Returns
+        -------
+        dict
+            包含 ic_mean, ic_ir, fr_mean, fr_ir, fr_annual, t_stat 等。
+        """
+        from stockquant.analysis.evaluator import FactorEvaluator
+
+        close = self.alpha_engine.close
+        ev = FactorEvaluator(close_panel=close)
+        return ev.evaluate(
+            factor_panel,
+            forward_period=forward_period,
+            neutralize=neutralize,
+            **kwargs,
+        )
+
+    def evaluate_multi_horizon(
+        self,
+        factor_panel: pd.DataFrame,
+        periods: list[int] | None = None,
+        **kwargs,
+    ) -> pd.DataFrame:
+        """多周期因子评价，返回 DataFrame 便于对比。"""
+        from stockquant.analysis.evaluator import FactorEvaluator
+
+        close = self.alpha_engine.close
+        ev = FactorEvaluator(close_panel=close)
+        results = ev.evaluate_multi_horizon(factor_panel, periods=periods, **kwargs)
+        return pd.DataFrame(results).T.rename_axis("period")
+
+    # ==================================================================
     # 绩效分析
     # ==================================================================
 
