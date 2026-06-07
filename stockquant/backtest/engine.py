@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import datetime as dt
-from typing import Sequence
+from typing import Sequence, TYPE_CHECKING
 
 import pandas as pd
 
@@ -16,6 +16,10 @@ from stockquant.strategy.base_strategy import BaseStrategy
 from stockquant.utils.config import Config
 from stockquant.utils.helpers import ensure_date, normalize_stock_code
 from stockquant.utils.logger import get_logger
+
+if TYPE_CHECKING:
+    from stockquant.analysis.performance import PerformanceAnalyzer
+    from stockquant.data.universe import BacktestDataset, Pool, StockUniverse
 
 logger = get_logger("backtest.engine")
 
@@ -42,6 +46,8 @@ class BacktestEngine:
 
         self._data: dict[str, pd.DataFrame] = {}
         self._trade_dates: list[dt.date] = []
+        self._benchmark: pd.DataFrame = pd.DataFrame()
+        self._benchmark_code: str = ""
 
     # ------------------------------------------------------------------
     # 配置接口
@@ -89,6 +95,54 @@ class BacktestEngine:
             self._trade_dates = [d for d in self._trade_dates if d >= sd]
         if ed:
             self._trade_dates = [d for d in self._trade_dates if d <= ed]
+
+    def load_universe(
+        self,
+        universe: StockUniverse | BacktestDataset,
+        start_date: str | dt.date | None = None,
+        end_date: str | dt.date | None = None,
+        benchmark: Pool | str | None = None,
+    ) -> None:
+        """从 StockUniverse 或 BacktestDataset 一步加载回测数据。
+
+        Parameters
+        ----------
+        universe : StockUniverse | BacktestDataset
+            ``StockUniverse`` → 自动调用 ``.load()`` 拉取数据。
+            ``BacktestDataset`` → 直接使用已加载的数据集。
+        start_date / end_date : str | date, optional
+            日期范围。传入 ``StockUniverse`` 时为必填；
+            传入 ``BacktestDataset`` 时可用于进一步过滤。
+        benchmark : Pool | str, optional
+            基准指数（传入 ``StockUniverse`` 时生效），默认沪深300。
+        """
+        from stockquant.data.universe import BacktestDataset as _BD, StockUniverse as _SU, Pool as _Pool
+
+        if isinstance(universe, _SU):
+            if start_date is None or end_date is None:
+                raise ValueError("传入 StockUniverse 时 start_date 和 end_date 为必填")
+            bm = benchmark if benchmark is not None else _Pool.CSI300
+            dataset = universe.load(str(start_date), str(end_date), bm)
+        elif isinstance(universe, _BD):
+            dataset = universe
+        else:
+            raise TypeError(
+                f"universe 参数类型错误: {type(universe).__name__}，"
+                f"请传入 StockUniverse 或 BacktestDataset。"
+            )
+
+        self.set_data(dataset.stock_data)
+        self._benchmark = dataset.benchmark
+        self._benchmark_code = dataset.benchmark_code
+
+        if start_date or end_date:
+            self.set_date_range(start_date, end_date)
+
+        logger.info(
+            f"已加载标的池: {len(dataset.codes)} 只, "
+            f"基准: {dataset.benchmark_code}, "
+            f"{dataset.start_date} ~ {dataset.end_date}"
+        )
 
     # ------------------------------------------------------------------
     # 运行
@@ -170,6 +224,8 @@ class BacktestEngine:
             daily_returns=self.context.portfolio.daily_returns,
             initial_capital=self.context.portfolio.initial_capital,
             final_value=self.context.portfolio.total_value,
+            benchmark=self._benchmark,
+            benchmark_code=self._benchmark_code,
         )
 
 
@@ -183,12 +239,16 @@ class BacktestResult:
         daily_returns: list[float],
         initial_capital: float,
         final_value: float,
+        benchmark: pd.DataFrame | None = None,
+        benchmark_code: str = "",
     ) -> None:
         self.equity_curve = equity_curve
         self.trade_log = trade_log
         self.daily_returns = daily_returns
         self.initial_capital = initial_capital
         self.final_value = final_value
+        self.benchmark = benchmark if benchmark is not None else pd.DataFrame()
+        self.benchmark_code = benchmark_code
 
     @property
     def total_return(self) -> float:
@@ -197,6 +257,22 @@ class BacktestResult:
     @property
     def total_trades(self) -> int:
         return len(self.trade_log)
+
+    def analyze(self) -> PerformanceAnalyzer:
+        """返回预加载的绩效分析器（含基准收益率）。"""
+        from stockquant.analysis.performance import PerformanceAnalyzer
+
+        benchmark_returns: list[float] = []
+        if not self.benchmark.empty and "close" in self.benchmark.columns:
+            bm = self.benchmark.sort_values("date")["close"]
+            benchmark_returns = bm.pct_change().dropna().tolist()
+
+        return PerformanceAnalyzer(
+            equity_curve=self.equity_curve,
+            trade_log=self.trade_log,
+            daily_returns=self.daily_returns,
+            benchmark_returns=benchmark_returns,
+        )
 
     def summary(self) -> dict:
         return {

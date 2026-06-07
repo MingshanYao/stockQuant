@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from stockquant.strategy.base_strategy import BaseStrategy
+from stockquant.strategy.base_strategy import BaseStrategy, StrategyRegistry
 from stockquant.utils.logger import get_logger
 
 logger = get_logger("strategy.alpha_factor")
@@ -113,3 +113,6 @@ class AlphaFactorStrategy(BaseStrategy):
                 self._target_pct,
                 reason=f"{self._label}调仓-买入",
             )
+
+
+StrategyRegistry.register("alpha_factor", AlphaFactorStrategy)

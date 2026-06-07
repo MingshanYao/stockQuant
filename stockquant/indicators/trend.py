@@ -7,7 +7,7 @@ from __future__ import annotations
 import pandas as pd
 import pandas_ta as ta
 
-from stockquant.indicators.base import BaseIndicator
+from stockquant.indicators.base import BaseIndicator, IndicatorRegistry
 
 
 class TrendIndicators(BaseIndicator):
@@ -67,3 +67,6 @@ class TrendIndicators(BaseIndicator):
         if bbands is not None:
             df = pd.concat([df, bbands], axis=1)
         return df
+
+
+IndicatorRegistry.register("trend", TrendIndicators)

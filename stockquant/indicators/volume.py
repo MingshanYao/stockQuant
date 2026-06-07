@@ -7,7 +7,7 @@ from __future__ import annotations
 import pandas as pd
 import pandas_ta as ta
 
-from stockquant.indicators.base import BaseIndicator
+from stockquant.indicators.base import BaseIndicator, IndicatorRegistry
 
 
 class VolumeIndicators(BaseIndicator):
@@ -57,3 +57,6 @@ class VolumeIndicators(BaseIndicator):
             df["high"], df["low"], df["close"], df["volume"], length=length
         )
         return df
+
+
+IndicatorRegistry.register("volume", VolumeIndicators)

@@ -48,7 +48,7 @@ import pandas as pd
 if TYPE_CHECKING:
     from stockquant.data.universe import BacktestDataset
 
-from stockquant.indicators.base import BaseIndicator
+from stockquant.indicators.base import BaseIndicator, IndicatorRegistry
 from stockquant.indicators.alpha101.operators import (
     adv,
     decay_linear,
@@ -1458,3 +1458,6 @@ class Alpha101Engine:
     def alpha101(self) -> pd.DataFrame:
         """(close − open) / ((high − low) + 0.001)"""
         return (self.close - self.open) / (self.high - self.low + 0.001)
+
+
+IndicatorRegistry.register("alpha101", Alpha101Indicators)

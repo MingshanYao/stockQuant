@@ -7,7 +7,7 @@ from __future__ import annotations
 import pandas as pd
 import pandas_ta as ta
 
-from stockquant.indicators.base import BaseIndicator
+from stockquant.indicators.base import BaseIndicator, IndicatorRegistry
 
 
 class OscillatorIndicators(BaseIndicator):
@@ -67,3 +67,6 @@ class OscillatorIndicators(BaseIndicator):
         """威廉指标 (Williams %R)。"""
         df[f"willr{length}"] = ta.willr(df["high"], df["low"], df["close"], length=length)
         return df
+
+
+IndicatorRegistry.register("oscillator", OscillatorIndicators)

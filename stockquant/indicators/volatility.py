@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import pandas_ta as ta
 
-from stockquant.indicators.base import BaseIndicator
+from stockquant.indicators.base import BaseIndicator, IndicatorRegistry
 
 
 class VolatilityIndicators(BaseIndicator):
@@ -54,3 +54,6 @@ class VolatilityIndicators(BaseIndicator):
             hv = hv * np.sqrt(252)
         df[f"hv{window}"] = hv
         return df
+
+
+IndicatorRegistry.register("volatility", VolatilityIndicators)

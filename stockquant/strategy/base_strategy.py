@@ -190,3 +190,31 @@ class BaseStrategy(ABC):
     def get_pending_orders(self) -> list[Order]:
         """获取未成交订单列表。"""
         return [o for o in self._orders if o.status == "pending"]
+
+
+class StrategyRegistry:
+    """策略注册表 — 根据名称创建策略实例。"""
+
+    _registry: dict[str, type[BaseStrategy]] = {}
+
+    @classmethod
+    def register(cls, name: str, strategy_cls: type[BaseStrategy]) -> None:
+        cls._registry[name.lower()] = strategy_cls
+
+    @classmethod
+    def create(cls, name: str, **kwargs) -> BaseStrategy:
+        name = name.lower()
+        if name not in cls._registry:
+            raise ValueError(f"未注册的策略: {name}，可用: {cls.list()}")
+        return cls._registry[name](**kwargs)
+
+    @classmethod
+    def list(cls) -> list[str]:
+        return sorted(cls._registry.keys())
+
+    @classmethod
+    def get(cls, name: str) -> type[BaseStrategy]:
+        name = name.lower()
+        if name not in cls._registry:
+            raise ValueError(f"未注册的策略: {name}，可用: {cls.list()}")
+        return cls._registry[name]

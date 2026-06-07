@@ -38,3 +38,31 @@ class BaseIndicator(ABC):
 
     def __repr__(self) -> str:
         return f"<Indicator: {self.name}>"
+
+
+class IndicatorRegistry:
+    """指标注册表 — 根据名称创建指标实例。"""
+
+    _registry: dict[str, type[BaseIndicator]] = {}
+
+    @classmethod
+    def register(cls, name: str, indicator_cls: type[BaseIndicator]) -> None:
+        cls._registry[name.lower()] = indicator_cls
+
+    @classmethod
+    def create(cls, name: str, **kwargs) -> BaseIndicator:
+        name = name.lower()
+        if name not in cls._registry:
+            raise ValueError(f"未注册的指标: {name}，可用: {cls.list()}")
+        return cls._registry[name](**kwargs)
+
+    @classmethod
+    def list(cls) -> list[str]:
+        return sorted(cls._registry.keys())
+
+    @classmethod
+    def get(cls, name: str) -> type[BaseIndicator]:
+        name = name.lower()
+        if name not in cls._registry:
+            raise ValueError(f"未注册的指标: {name}，可用: {cls.list()}")
+        return cls._registry[name]

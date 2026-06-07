@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from stockquant.strategy.base_strategy import BaseStrategy
+from stockquant.strategy.base_strategy import BaseStrategy, StrategyRegistry
 from stockquant.risk.risk_monitor import RiskMonitor
 
 
@@ -89,3 +89,6 @@ class DualMAStrategy(BaseStrategy):
             elif short_ma.iloc[-1] > long_ma.iloc[-1] and short_ma.iloc[-2] <= long_ma.iloc[-2]:
                 if pos and pos.quantity == 0:
                     self.order_target_percent(code, position_pct, reason="金叉买入")
+
+
+StrategyRegistry.register("dual_ma", DualMAStrategy)
