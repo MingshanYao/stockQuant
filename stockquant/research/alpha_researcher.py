@@ -172,12 +172,20 @@ class AlphaResearcher:
         initial_capital: float = 1_000_000.0,
         max_positions: int = 10,
         rebalance_freq: int = 5,
+        enable_risk_mgmt: bool = False,
+        stop_loss_pct: float = 0.08,
+        take_profit_pct: float = 0.20,
+        max_drawdown_limit: float = 0.20,
     ) -> None:
         self.dataset = dataset
         self.benchmark_df = dataset.benchmark
         self.initial_capital = initial_capital
         self.max_positions = max_positions
         self.rebalance_freq = rebalance_freq
+        self.enable_risk_mgmt = enable_risk_mgmt
+        self.stop_loss_pct = stop_loss_pct
+        self.take_profit_pct = take_profit_pct
+        self.max_drawdown_limit = max_drawdown_limit
 
         self._alpha_engine: "Alpha101Engine | None" = None
         self._alpha_cache: dict[int, pd.DataFrame] = {}
@@ -291,6 +299,10 @@ class AlphaResearcher:
             rebalance_freq=freq,
             ascending=ascending,
             label=_label,
+            enable_risk_mgmt=self.enable_risk_mgmt,
+            stop_loss_pct=self.stop_loss_pct,
+            take_profit_pct=self.take_profit_pct,
+            max_drawdown_limit=self.max_drawdown_limit,
         )
 
         # 构建回测引擎并设置初始资金
