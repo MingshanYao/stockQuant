@@ -40,6 +40,8 @@ Notes
 
 from __future__ import annotations
 
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import TYPE_CHECKING, Any, Sequence
 
 import numpy as np
@@ -526,9 +528,18 @@ class Alpha101Engine:
         >>> factors[1]   # Alpha#001 面板数据
         """
         results: dict[int, pd.DataFrame] = {}
-        for i in alpha_ids:
-            results[i] = self.compute_factor(i)
-        logger.info(f"计算 {len(results)} 个指定 Alpha 因子: {list(alpha_ids)}")
+        max_workers = min(os.cpu_count() or 4, len(alpha_ids), 16)
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(self.compute_factor, i): i for i in alpha_ids}
+            for future in as_completed(futures):
+                i = futures[future]
+                try:
+                    results[i] = future.result()
+                except Exception as e:
+                    logger.warning(f"Alpha#{i} 计算失败: {e}")
+
+        logger.info(f"计算 {len(results)} 个指定 Alpha 因子 (并行={max_workers}线程)")
         return results
 
     def compute_all(
@@ -542,18 +553,24 @@ class Alpha101Engine:
         include_industry : bool
             是否包含需要行业数据的因子（在无行业数据时自动跳过中性化步骤）。
         """
+        to_compute = [
+            i for i in range(1, 102)
+            if hasattr(self, f"alpha{i:03d}")
+            and (include_industry or i not in INDUSTRY_ALPHAS)
+        ]
         results: dict[int, pd.DataFrame] = {}
-        for i in range(1, 102):
-            method = getattr(self, f"alpha{i:03d}", None)
-            if method is None:
-                continue
-            if not include_industry and i in INDUSTRY_ALPHAS:
-                continue
-            try:
-                results[i] = self._clean(method())
-            except Exception as e:
-                logger.warning(f"Alpha#{i} 计算失败: {e}")
-        logger.info(f"成功计算 {len(results)}/101 个 Alpha 因子")
+        max_workers = min(os.cpu_count() or 4, len(to_compute), 16)
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(self.compute_factor, i): i for i in to_compute}
+            for future in as_completed(futures):
+                i = futures[future]
+                try:
+                    results[i] = future.result()
+                except Exception as e:
+                    logger.warning(f"Alpha#{i} 计算失败: {e}")
+
+        logger.info(f"成功计算 {len(results)}/{len(to_compute)} 个 Alpha 因子 (并行={max_workers}线程)")
         return results
 
     # ==================================================================
