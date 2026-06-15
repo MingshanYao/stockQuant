@@ -63,3 +63,56 @@ class TestStockFilter:
         result = flt.filter(df)
         assert len(result) == 2
         assert "*ST某某" not in result["name"].values
+
+
+class TestRiskMonitorGraduated:
+    @pytest.fixture
+    def monitor(self):
+        from stockquant.risk.risk_monitor import RiskMonitor
+        return RiskMonitor()
+
+    def test_green_when_no_drawdown(self, monitor):
+        monitor.update_value(100_000)
+        monitor.update_value(101_000)
+        from stockquant.risk.risk_monitor import AlertLevel
+        level = monitor.update_value(100_500)
+        assert level == AlertLevel.GREEN
+
+    def test_yellow_at_5pct_drawdown(self, monitor):
+        monitor.update_value(100_000)
+        from stockquant.risk.risk_monitor import AlertLevel
+        level = monitor.update_value(95_000)
+        assert level == AlertLevel.YELLOW
+
+    def test_orange_at_8pct_drawdown(self, monitor):
+        monitor.update_value(100_000)
+        from stockquant.risk.risk_monitor import AlertLevel
+        level = monitor.update_value(92_000)
+        assert level == AlertLevel.ORANGE
+
+    def test_red_at_12pct_drawdown(self, monitor):
+        monitor.update_value(100_000)
+        from stockquant.risk.risk_monitor import AlertLevel
+        level = monitor.update_value(88_000)
+        assert level == AlertLevel.RED
+
+    def test_peak_updates(self, monitor):
+        monitor.update_value(100_000)
+        monitor.update_value(110_000)
+        monitor.update_value(105_000)
+        assert monitor._peak_value == 110_000
+
+    def test_returns_alert_level_not_bool(self, monitor):
+        monitor.update_value(100_000)
+        from stockquant.risk.risk_monitor import AlertLevel
+        result = monitor.update_value(95_000)
+        assert isinstance(result, AlertLevel)
+
+    def test_backward_compat_update_accepts_context(self, monitor):
+        """Old `update(context)` interface still works."""
+        from stockquant.backtest.context import Context
+        ctx = Context(initial_capital=100_000)
+        monitor.update_value(100_000)  # set initial peak
+        from stockquant.risk.risk_monitor import AlertLevel
+        level = monitor.update(ctx)
+        assert isinstance(level, AlertLevel)
