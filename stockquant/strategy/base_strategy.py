@@ -57,6 +57,8 @@ class BaseStrategy(ABC):
         - ``after_trading()`` (可选): 收盘后回调。
     """
 
+    uses_lightweight_bar: bool = False
+
     def __init__(self) -> None:
         self.context: Context | None = None
         self._orders: list[Order] = []
