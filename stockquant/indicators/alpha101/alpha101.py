@@ -337,6 +337,15 @@ class Alpha101Indicators(BaseIndicator):
         )
 
 
+# 模块级全局变量用于 multiprocessing fork（避免 pickle engine）
+_alpha101_engine = None
+
+
+def _compute_one_alpha101(alpha_id: int):
+    """模块级函数，用于 ProcessPoolExecutor fork。"""
+    return alpha_id, _alpha101_engine.compute_factor(alpha_id)
+
+
 class Alpha101Engine:
     """Alpha#101 面板计算引擎。
 
@@ -507,10 +516,6 @@ class Alpha101Engine:
                 index=self.close.index, columns=self.close.columns, dtype=float
             )
 
-    def _compute_one(self, alpha_id: int):
-        """单个因子计算（用于 multiprocessing）。"""
-        return alpha_id, self.compute_factor(alpha_id)
-
     def compute_factors(
         self,
         alpha_ids: Sequence[int],
@@ -532,12 +537,14 @@ class Alpha101Engine:
         >>> factors = engine.compute_factors([1, 6, 12])
         >>> factors[1]   # Alpha#001 面板数据
         """
+        global _alpha101_engine
+        _alpha101_engine = self
         results: dict[int, pd.DataFrame] = {}
         max_workers = min(os.cpu_count() or 4, len(alpha_ids))
 
         ctx = multiprocessing.get_context("fork")
         with ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx) as executor:
-            futures = {executor.submit(self._compute_one, i): i for i in alpha_ids}
+            futures = {executor.submit(_compute_one_alpha101, i): i for i in alpha_ids}
             for future in as_completed(futures):
                 i = futures[future]
                 try:
@@ -560,6 +567,8 @@ class Alpha101Engine:
         include_industry : bool
             是否包含需要行业数据的因子（在无行业数据时自动跳过中性化步骤）。
         """
+        global _alpha101_engine
+        _alpha101_engine = self
         to_compute = [
             i for i in range(1, 102)
             if hasattr(self, f"alpha{i:03d}")
@@ -570,7 +579,7 @@ class Alpha101Engine:
 
         ctx = multiprocessing.get_context("fork")
         with ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx) as executor:
-            futures = {executor.submit(self._compute_one, i): i for i in to_compute}
+            futures = {executor.submit(_compute_one_alpha101, i): i for i in to_compute}
             for future in as_completed(futures):
                 i = futures[future]
                 try:
