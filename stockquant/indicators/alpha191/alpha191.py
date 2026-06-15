@@ -285,7 +285,7 @@ class Alpha191Engine:
         _alpha191_engine = self
         to_compute = [i for i in alpha_ids if i not in SKIP_ALPHAS]
         results: dict[int, pd.DataFrame] = {}
-        max_workers = min(os.cpu_count() or 4, len(to_compute))
+        max_workers = min(max(os.cpu_count() - 2, 1), len(to_compute))
 
         ctx = multiprocessing.get_context("fork")
         with ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx) as executor:
@@ -309,7 +309,7 @@ class Alpha191Engine:
             if i not in SKIP_ALPHAS and hasattr(self, f"alpha{i:03d}")
         ]
         results: dict[int, pd.DataFrame] = {}
-        max_workers = min(os.cpu_count() or 4, len(to_compute))
+        max_workers = min(max(os.cpu_count() - 2, 1), len(to_compute))
 
         ctx = multiprocessing.get_context("fork")
         with ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx) as executor:

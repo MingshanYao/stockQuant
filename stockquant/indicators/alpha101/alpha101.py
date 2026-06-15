@@ -575,7 +575,7 @@ class Alpha101Engine:
             and (include_industry or i not in INDUSTRY_ALPHAS)
         ]
         results: dict[int, pd.DataFrame] = {}
-        max_workers = min(os.cpu_count() or 4, len(to_compute))
+        max_workers = min(max(os.cpu_count() - 2, 1), len(to_compute))
 
         ctx = multiprocessing.get_context("fork")
         with ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx) as executor:
