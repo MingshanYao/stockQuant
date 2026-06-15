@@ -12,8 +12,8 @@ project:
 
 # ---------- 数据源 ----------
 data_source:
-  primary: akshare          # 主数据源: akshare / baostock
-  fallback: baostock        # 备用数据源
+  primary: akshare           # 主数据源: akshare / baostock
+  fallback: baostock         # 备用数据源
 
 # ---------- 数据库 ----------
 database:
