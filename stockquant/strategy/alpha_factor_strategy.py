@@ -53,6 +53,8 @@ class AlphaFactorStrategy(BaseStrategy):
     max_drawdown_orange : float = 0.10  橙→红 阈值
     """
 
+    uses_lightweight_bar = True
+
     def initialize(self) -> None:
         self._alpha_panel: pd.DataFrame = self.get_param("alpha_panel")
         self._max_pos: int = self.get_param("max_positions", 50)
@@ -134,7 +136,7 @@ class AlphaFactorStrategy(BaseStrategy):
 
         return regime_scale * dd_scale
 
-    def handle_bar(self, bar: dict) -> None:
+    def handle_bar(self, bar) -> None:
         # ── 感知层: 更新回撤预警（每 bar）──────────
         alert_level = AlertLevel.GREEN
         if self._risk_enabled and self.context is not None:
@@ -176,7 +178,7 @@ class AlphaFactorStrategy(BaseStrategy):
             return
         today_alpha = self._alpha_panel.loc[valid_idx[-1]].dropna()
 
-        available = [c for c in today_alpha.index if c in bar and not bar[c].empty]
+        available = [c for c in today_alpha.index if c in bar]
         if not available:
             return
         today_alpha = today_alpha[available]
