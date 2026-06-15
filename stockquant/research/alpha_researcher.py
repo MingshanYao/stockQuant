@@ -176,6 +176,10 @@ class AlphaResearcher:
         stop_loss_pct: float = 0.08,
         take_profit_pct: float = 0.20,
         max_drawdown_limit: float = 0.20,
+        trailing_stop_pct: float = 0.05,
+        max_drawdown_green: float = 0.04,
+        max_drawdown_yellow: float = 0.07,
+        max_drawdown_orange: float = 0.10,
     ) -> None:
         self.dataset = dataset
         self.benchmark_df = dataset.benchmark
@@ -186,6 +190,10 @@ class AlphaResearcher:
         self.stop_loss_pct = stop_loss_pct
         self.take_profit_pct = take_profit_pct
         self.max_drawdown_limit = max_drawdown_limit
+        self.trailing_stop_pct = trailing_stop_pct
+        self.max_drawdown_green = max_drawdown_green
+        self.max_drawdown_yellow = max_drawdown_yellow
+        self.max_drawdown_orange = max_drawdown_orange
 
         self._alpha_engine: "Alpha101Engine | None" = None
         self._alpha_cache: dict[int, pd.DataFrame] = {}
@@ -303,6 +311,10 @@ class AlphaResearcher:
             stop_loss_pct=self.stop_loss_pct,
             take_profit_pct=self.take_profit_pct,
             max_drawdown_limit=self.max_drawdown_limit,
+            trailing_stop_pct=self.trailing_stop_pct,
+            max_drawdown_green=self.max_drawdown_green,
+            max_drawdown_yellow=self.max_drawdown_yellow,
+            max_drawdown_orange=self.max_drawdown_orange,
         )
 
         # 构建回测引擎并设置初始资金
@@ -312,6 +324,11 @@ class AlphaResearcher:
         bt_engine.context.portfolio.total_value = self.initial_capital
         bt_engine.set_strategy(strategy)
         bt_engine.set_data(self.dataset.stock_data)
+
+        # Pass benchmark to engine for regime detection
+        if not self.benchmark_df.empty:
+            bt_engine._benchmark = self.benchmark_df
+            bt_engine._benchmark_code = self.dataset.benchmark_code
 
         sd = start_date or self.dataset.start_date
         ed = end_date or self.dataset.end_date
