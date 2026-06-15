@@ -559,7 +559,7 @@ class Alpha101Engine:
             and (include_industry or i not in INDUSTRY_ALPHAS)
         ]
         results: dict[int, pd.DataFrame] = {}
-        max_workers = min(os.cpu_count() or 4, len(to_compute), 16)
+        max_workers = min((os.cpu_count() or 4) * 2, len(to_compute))
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {executor.submit(self.compute_factor, i): i for i in to_compute}
