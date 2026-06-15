@@ -35,12 +35,16 @@ import os
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # 风险参数组合（按回撤容忍度排序）
+# 新框架：回撤控制由 MarketRegimeDetector + 分级 RiskMonitor 统一管理
+# 每个 profile 配置个股层面的止损/止盈/移动止损参数
+# 市场状态仓位系数（牛100%/正常80%/熊50%/危机20%）和
+# 分级DD预警（绿100%/黄80%/橙60%/红30%）是框架内置的，无需外部配置
 RISK_PROFILES = {
-    "无风控(基线)":    {"enable": False, "sl": 0.08, "tp": 0.20, "dd": 0.20},
-    "宽松风控":        {"enable": True,  "sl": 0.15, "tp": 0.30, "dd": 0.25},
-    "适度风控":        {"enable": True,  "sl": 0.10, "tp": 0.20, "dd": 0.15},
-    "严格风控":        {"enable": True,  "sl": 0.08, "tp": 0.15, "dd": 0.10},
-    "极严风控(5%回撤)": {"enable": True,  "sl": 0.05, "tp": 0.10, "dd": 0.05},
+    "无风控(基线)":        {"enable": False, "sl": 0.08, "tp": 0.20, "ts": 0.05},
+    "新框架_默认参数":      {"enable": True,  "sl": 0.08, "tp": 0.20, "ts": 0.05},
+    "新框架_紧止损":        {"enable": True,  "sl": 0.05, "tp": 0.15, "ts": 0.03},
+    "新框架_松止损":        {"enable": True,  "sl": 0.12, "tp": 0.25, "ts": 0.08},
+    "新框架_仅靠框架(无个股止损)": {"enable": True,  "sl": 0.50, "tp": 0.50, "ts": 0.50},
 }
 
 print("=" * 70)
@@ -49,7 +53,7 @@ print("=" * 70)
 print(f"风险配置组数: {len(RISK_PROFILES)}")
 for name, p in RISK_PROFILES.items():
     if p["enable"]:
-        print(f"  {name}: 止损={p['sl']:.0%}, 止盈={p['tp']:.0%}, 回撤熔断={p['dd']:.0%}")
+        print(f"  {name}: 止损={p['sl']:.0%}, 止盈={p['tp']:.0%}, 移动止损={p['ts']:.0%}")
     else:
         print(f"  {name}")
 
@@ -215,7 +219,7 @@ for profile_name, risk_params in RISK_PROFILES.items():
                 enable_risk_mgmt=risk_params["enable"],
                 stop_loss_pct=risk_params["sl"],
                 take_profit_pct=risk_params["tp"],
-                max_drawdown_limit=risk_params["dd"],
+                trailing_stop_pct=risk_params["ts"],
             )
             r = researcher.run_backtest(alpha_panel=combo_panel, label=label)
             all_results[label] = r
