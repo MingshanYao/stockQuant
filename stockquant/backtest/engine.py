@@ -158,8 +158,20 @@ class BacktestEngine:
         logger.info("====== 回测开始 ======")
         self.strategy.initialize()
 
+        # Pre-extract benchmark close series for fast lookup
+        bm_close = None
+        if not self._benchmark.empty and "close" in self._benchmark.columns:
+            bm = self._benchmark.sort_values("date").set_index("date")
+            bm_close = bm["close"]
+
         for i, trade_date in enumerate(self._trade_dates):
             self.context.current_date = trade_date
+
+            # Expose benchmark prices up to current date for regime detection
+            if bm_close is not None:
+                self.context.benchmark_prices = bm_close[bm_close.index <= pd.Timestamp(trade_date)]
+            else:
+                self.context.benchmark_prices = None
 
             # 1. 日切：解冻 T+1
             self.broker.on_new_day()

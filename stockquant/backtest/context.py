@@ -36,6 +36,7 @@ class Context:
         self.current_date: dt.date | None = None
         self.current_data: dict[str, pd.DataFrame] = {}
         self._price_cache: dict[str, float] = {}
+        self.benchmark_prices: "pd.Series | None" = None
 
     # ------------------------------------------------------------------
     # 属性快捷方式
