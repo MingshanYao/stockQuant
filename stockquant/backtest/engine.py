@@ -48,6 +48,10 @@ class BacktestEngine:
         self._trade_dates: list[dt.date] = []
         self._benchmark: pd.DataFrame = pd.DataFrame()
         self._benchmark_code: str = ""
+        self._close_panel: pd.DataFrame = pd.DataFrame()
+        self._code_date_idx: dict[str, dict[dt.date, int]] = {}
+        self._bm_close: "pd.Series | None" = None
+        self._bm_index: "pd.DatetimeIndex | None" = None
 
     # ------------------------------------------------------------------
     # 配置接口
@@ -81,6 +85,20 @@ class BacktestEngine:
             if "date" in df.columns:
                 all_dates.update(df["date"].dt.date)
         self._trade_dates = sorted(all_dates)
+
+        # 预计算收盘价面板 (dates × codes) 和日期→位置索引
+        close_data: dict[str, pd.Series] = {}
+        self._code_date_idx = {}
+        for code, df in self._data.items():
+            if "date" in df.columns and "close" in df.columns:
+                close_data[code] = df.set_index("date")["close"]
+            if "date" in df.columns:
+                dates = df["date"]
+                self._code_date_idx[code] = {
+                    d.date(): i for i, d in enumerate(dates)
+                }
+        self._close_panel = pd.DataFrame(close_data).sort_index() if close_data else pd.DataFrame()
+
         logger.info(f"已加载 {len(self._data)} 只标的，{len(self._trade_dates)} 个交易日")
 
     def set_date_range(
@@ -158,20 +176,19 @@ class BacktestEngine:
         logger.info("====== 回测开始 ======")
         self.strategy.initialize()
 
-        # Pre-extract benchmark close series for fast lookup
-        bm_close = None
+        # 预提取基准收盘价序列，用于快速查找
         if not self._benchmark.empty and "close" in self._benchmark.columns:
             bm = self._benchmark.sort_values("date").set_index("date")
-            bm_close = bm["close"]
+            self._bm_close = bm["close"]
+            self._bm_index = bm["close"].index
+        else:
+            self._bm_close = None
+            self._bm_index = None
+
+        _use_lightweight = getattr(self.strategy, "uses_lightweight_bar", False)
 
         for i, trade_date in enumerate(self._trade_dates):
             self.context.current_date = trade_date
-
-            # Expose benchmark prices up to current date for regime detection
-            if bm_close is not None:
-                self.context.benchmark_prices = bm_close[bm_close.index <= pd.Timestamp(trade_date)]
-            else:
-                self.context.benchmark_prices = None
 
             # 1. 日切：解冻 T+1
             self.broker.on_new_day()
@@ -179,20 +196,28 @@ class BacktestEngine:
             # 2. 盘前回调
             self.strategy.before_trading()
 
-            # 3. 构建当日 bar 数据
-            bar = self._build_bar(trade_date)
-            if not bar:
-                continue
-
-            # 4. 更新价格缓存
-            for code, row in bar.items():
-                if not row.empty:
-                    price = row["close"].iloc[-1]
-                    self.context.update_price(code, price)
-
-            # 5. 策略逻辑
-            self.strategy._orders.clear()
-            self.strategy.handle_bar(bar)
+            if _use_lightweight:
+                # ── 轻量 bar 模式：跳过 _build_bar，直接使用 close_panel ──
+                self._setup_trade_date(trade_date)
+                ts = pd.Timestamp(trade_date)
+                available: set[str] = set()
+                prices: dict[str, float] = {}
+                if ts in self._close_panel.index:
+                    row = self._close_panel.loc[ts].dropna()
+                    available = set(row.index)
+                    prices = row.to_dict()
+                from stockquant.backtest.bar import BarSnapshot
+                bar_snapshot = BarSnapshot(date=trade_date, codes=available, close=prices)
+                self.strategy._orders.clear()
+                self.strategy.handle_bar(bar_snapshot)
+            else:
+                # 传统模式：构建完整 bar（零拷贝 iloc 切片）
+                self._setup_trade_date(trade_date)
+                bar = self._build_bar(trade_date)
+                if not bar:
+                    continue
+                self.strategy._orders.clear()
+                self.strategy.handle_bar(bar)
 
             # 6. 撮合订单
             for order in self.strategy.get_pending_orders():
@@ -215,15 +240,33 @@ class BacktestEngine:
     # ------------------------------------------------------------------
 
     def _build_bar(self, trade_date: dt.date) -> dict[str, pd.DataFrame]:
-        """截取截至当前日期的历史数据。"""
-        bar = {}
+        """使用预计算索引的零拷贝 bar 构建。"""
+        bar: dict[str, pd.DataFrame] = {}
         for code, df in self._data.items():
-            if "date" in df.columns:
-                mask = df["date"].dt.date <= trade_date
-                subset = df[mask]
-                if not subset.empty:
-                    bar[code] = subset
+            idx_map = self._code_date_idx.get(code)
+            if idx_map is None:
+                continue
+            idx = idx_map.get(trade_date)
+            if idx is not None:
+                bar[code] = df.iloc[: idx + 1]
         return bar
+
+    def _setup_trade_date(self, trade_date: dt.date) -> None:
+        """设置当日上下文状态：基准价格切片 + 价格缓存更新。"""
+        ts = pd.Timestamp(trade_date)
+
+        # 基准价格（零拷贝 iloc 切片替代布尔掩码）
+        if self._bm_index is not None and self._bm_close is not None:
+            pos = self._bm_index.searchsorted(ts, side="right")
+            self.context.benchmark_prices = self._bm_close.iloc[:pos]
+        else:
+            self.context.benchmark_prices = None
+
+        # 价格缓存更新（从 close_panel 一次查找替代遍历 bar）
+        if ts in self._close_panel.index:
+            row = self._close_panel.loc[ts].dropna()
+            for code, price in row.items():
+                self.context.update_price(code, price)
 
     def _build_result(self) -> BacktestResult:
         """汇总回测结果。"""
