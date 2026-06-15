@@ -8,7 +8,8 @@
 from __future__ import annotations
 
 import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import TYPE_CHECKING, Any, Sequence
 
 import numpy as np
@@ -270,21 +271,27 @@ class Alpha191Engine:
                 index=self.close.index, columns=self.close.columns, dtype=float
             )
 
+    def _compute_one(self, alpha_id: int) -> tuple[int, pd.DataFrame]:
+        """单个因子计算（模块级函数用于 multiprocessing）。"""
+        return alpha_id, self.compute_factor(alpha_id)
+
     def compute_factors(self, alpha_ids: Sequence[int]) -> dict[int, pd.DataFrame]:
         to_compute = [i for i in alpha_ids if i not in SKIP_ALPHAS]
         results: dict[int, pd.DataFrame] = {}
-        max_workers = min((os.cpu_count() or 4) * 2, len(to_compute))
+        max_workers = min(os.cpu_count() or 4, len(to_compute))
 
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(self.compute_factor, i): i for i in to_compute}
+        ctx = multiprocessing.get_context("fork")
+        with ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx) as executor:
+            futures = {executor.submit(self._compute_one, i): i for i in to_compute}
             for future in as_completed(futures):
                 i = futures[future]
                 try:
-                    results[i] = future.result()
+                    idx, panel = future.result()
+                    results[idx] = panel
                 except Exception as e:
                     logger.warning(f"Alpha191#{i} 计算失败: {e}")
 
-        logger.info(f"计算 {len(results)} 个指定 Alpha191 因子 (并行={max_workers}线程)")
+        logger.info(f"计算 {len(results)} 个指定 Alpha191 因子 (并行={max_workers}进程)")
         return results
 
     def compute_all(self) -> dict[int, pd.DataFrame]:
@@ -293,18 +300,20 @@ class Alpha191Engine:
             if i not in SKIP_ALPHAS and hasattr(self, f"alpha{i:03d}")
         ]
         results: dict[int, pd.DataFrame] = {}
-        max_workers = min((os.cpu_count() or 4) * 2, len(to_compute))
+        max_workers = min(os.cpu_count() or 4, len(to_compute))
 
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(self.compute_factor, i): i for i in to_compute}
+        ctx = multiprocessing.get_context("fork")
+        with ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx) as executor:
+            futures = {executor.submit(self._compute_one, i): i for i in to_compute}
             for future in as_completed(futures):
                 i = futures[future]
                 try:
-                    results[i] = future.result()
+                    idx, panel = future.result()
+                    results[idx] = panel
                 except Exception as e:
                     logger.warning(f"Alpha191#{i} 计算失败: {e}")
 
-        logger.info(f"成功计算 {len(results)}/{TOTAL_ALPHAS} 个 Alpha191 因子 (并行={max_workers}线程)")
+        logger.info(f"成功计算 {len(results)}/{TOTAL_ALPHAS} 个 Alpha191 因子 (并行={max_workers}进程)")
         return results
 
     # ==================================================================

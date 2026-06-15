@@ -41,7 +41,8 @@ Notes
 from __future__ import annotations
 
 import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import TYPE_CHECKING, Any, Sequence
 
 import numpy as np
@@ -506,6 +507,10 @@ class Alpha101Engine:
                 index=self.close.index, columns=self.close.columns, dtype=float
             )
 
+    def _compute_one(self, alpha_id: int):
+        """单个因子计算（用于 multiprocessing）。"""
+        return alpha_id, self.compute_factor(alpha_id)
+
     def compute_factors(
         self,
         alpha_ids: Sequence[int],
@@ -528,18 +533,20 @@ class Alpha101Engine:
         >>> factors[1]   # Alpha#001 面板数据
         """
         results: dict[int, pd.DataFrame] = {}
-        max_workers = min(os.cpu_count() or 4, len(alpha_ids), 16)
+        max_workers = min(os.cpu_count() or 4, len(alpha_ids))
 
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(self.compute_factor, i): i for i in alpha_ids}
+        ctx = multiprocessing.get_context("fork")
+        with ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx) as executor:
+            futures = {executor.submit(self._compute_one, i): i for i in alpha_ids}
             for future in as_completed(futures):
                 i = futures[future]
                 try:
-                    results[i] = future.result()
+                    idx, panel = future.result()
+                    results[idx] = panel
                 except Exception as e:
                     logger.warning(f"Alpha#{i} 计算失败: {e}")
 
-        logger.info(f"计算 {len(results)} 个指定 Alpha 因子 (并行={max_workers}线程)")
+        logger.info(f"计算 {len(results)} 个指定 Alpha 因子 (并行={max_workers}进程)")
         return results
 
     def compute_all(
@@ -559,18 +566,20 @@ class Alpha101Engine:
             and (include_industry or i not in INDUSTRY_ALPHAS)
         ]
         results: dict[int, pd.DataFrame] = {}
-        max_workers = min((os.cpu_count() or 4) * 2, len(to_compute))
+        max_workers = min(os.cpu_count() or 4, len(to_compute))
 
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(self.compute_factor, i): i for i in to_compute}
+        ctx = multiprocessing.get_context("fork")
+        with ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx) as executor:
+            futures = {executor.submit(self._compute_one, i): i for i in to_compute}
             for future in as_completed(futures):
                 i = futures[future]
                 try:
-                    results[i] = future.result()
+                    idx, panel = future.result()
+                    results[idx] = panel
                 except Exception as e:
                     logger.warning(f"Alpha#{i} 计算失败: {e}")
 
-        logger.info(f"成功计算 {len(results)}/{len(to_compute)} 个 Alpha 因子 (并行={max_workers}线程)")
+        logger.info(f"成功计算 {len(results)}/{len(to_compute)} 个 Alpha 因子 (并行={max_workers}进程)")
         return results
 
     # ==================================================================
