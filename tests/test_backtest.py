@@ -11,6 +11,7 @@ from stockquant.backtest.broker import Broker
 from stockquant.backtest.engine import BacktestEngine, BacktestResult
 from stockquant.data.universe import BacktestDataset
 from stockquant.strategy.base_strategy import BaseStrategy, Order
+from stockquant.backtest.bar import BarSnapshot
 from stockquant.utils.config import Config
 
 
@@ -84,6 +85,28 @@ class TestBroker:
         sell_order2 = Order(code="600000", direction="sell", quantity=1000, price=None)
         result2 = broker.process_order(sell_order2)
         assert result2.status == "filled"
+
+
+# ======================================================================
+# BarSnapshot
+# ======================================================================
+
+class TestBarSnapshot:
+    def test_contains(self):
+        bar = BarSnapshot(
+            date=dt.date(2024, 1, 15),
+            codes={"600000", "000001"},
+            close={"600000": 10.5, "000001": 20.3},
+        )
+        assert "600000" in bar
+        assert "000001" in bar
+        assert "999999" not in bar
+
+    def test_defaults(self):
+        bar = BarSnapshot(date=dt.date(2024, 1, 15))
+        assert bar.codes == set()
+        assert bar.close == {}
+        assert "anything" not in bar
 
 
 # ======================================================================
@@ -213,3 +236,30 @@ class TestEngine:
         for d in engine._trade_dates:
             assert d >= dt.date(2024, 2, 1)
             assert d <= dt.date(2024, 2, 28)
+
+    def test_lightweight_bar_backtest(self):
+        """验证轻量 bar 模式回测产生正确的权益曲线。"""
+        dataset = _make_dataset(["600000", "000001"], n_days=30)
+
+        dates = pd.bdate_range(dt.date(2024, 1, 2), periods=30)
+        rng = np.random.default_rng(42)
+        alpha_panel = pd.DataFrame(
+            rng.normal(0, 1, (30, 2)),
+            index=dates, columns=["600000", "000001"],
+        )
+
+        from stockquant.strategy.alpha_factor_strategy import AlphaFactorStrategy
+        strategy = AlphaFactorStrategy()
+        strategy.set_params(
+            alpha_panel=alpha_panel, max_positions=2, rebalance_freq=5,
+            label="Test", enable_risk_mgmt=False,
+        )
+
+        engine = BacktestEngine()
+        engine.set_strategy(strategy)
+        engine.load_universe(dataset)
+
+        result = engine.run()
+        assert isinstance(result, BacktestResult)
+        assert not result.equity_curve.empty
+        assert len(result.equity_curve) > 0
