@@ -7,6 +7,10 @@
 
 from __future__ import annotations
 
+import os
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor, as_completed
+
 import numpy as np
 import pandas as pd
 
@@ -16,6 +20,15 @@ from stockquant.utils.logger import get_logger
 logger = get_logger("analysis.evaluator")
 
 TRADING_DAYS_PER_YEAR = 252
+
+# 模块级全局用于 multiprocessing fork（避免 pickle evaluator）
+_evaluator: "FactorEvaluator | None" = None
+
+
+def _eval_one(item: tuple):
+    """模块级函数，用于 ProcessPoolExecutor fork。"""
+    name, panel, forward_period, kwargs = item
+    return name, _evaluator.evaluate(panel, forward_period=forward_period, **kwargs)
 
 
 class FactorEvaluator:
@@ -150,13 +163,25 @@ class FactorEvaluator:
         **kwargs,
     ) -> pd.DataFrame:
         """因子体系批量评价 — 返回所有因子的四指标汇总表。"""
-        rows = []
-        total = len(factors)
-        for i, (name, panel) in enumerate(factors.items(), 1):
-            logger.info(f"[{i}/{total}] 评价因子: {name}")
-            metrics = self.evaluate(panel, forward_period=forward_period, **kwargs)
-            metrics["factor"] = name
-            rows.append(metrics)
+        global _evaluator
+        _evaluator = self
+
+        items = [(name, panel, forward_period, kwargs) for name, panel in factors.items()]
+        rows: list[dict] = []
+        max_workers = min(max(os.cpu_count() - 2, 1), len(items))
+
+        ctx = multiprocessing.get_context("fork")
+        with ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx) as executor:
+            total = len(items)
+            futures = {executor.submit(_eval_one, item): item[0] for item in items}
+            for i, future in enumerate(as_completed(futures), 1):
+                try:
+                    name, metrics = future.result()
+                    metrics["factor"] = name
+                    rows.append(metrics)
+                except Exception as e:
+                    name = futures[future]
+                    logger.warning(f"[{i}/{total}] 评价失败 {name}: {e}")
 
         df = pd.DataFrame(rows).set_index("factor")
         return df.reindex(df["ic_mean"].abs().sort_values(ascending=False).index)
