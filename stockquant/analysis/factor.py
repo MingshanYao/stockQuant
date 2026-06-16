@@ -191,3 +191,132 @@ class FactorAnalyzer:
             return df.mul(weights, axis=1).sum(axis=1)
         else:
             return df.mean(axis=1)
+
+    # ------------------------------------------------------------------
+    # 滚动因子收益率合成
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def calc_rolling_factor_returns(
+        factor_panels: dict[str, pd.DataFrame],
+        returns_panel: pd.DataFrame,
+        window: int = 250,
+        forward_period: int = 1,
+    ) -> dict[str, pd.Series]:
+        """计算各因子的滚动因子收益率序列。
+
+        对每个交易日，用截面 OLS 回归计算因子收益率：
+            r_fwd = β_f · f_norm + α + ε
+        其中 r_fwd 是前向收益，f_norm 是标准化因子值。
+
+        Parameters
+        ----------
+        factor_panels : dict
+            因子名 → 因子面板（行=日期，列=股票代码）。
+        returns_panel : DataFrame
+            前向收益面板（同结构）。
+        window : int
+            滚动窗口长度（交易日数）。
+        forward_period : int
+            预测周期。
+
+        Returns
+        -------
+        dict[str, Series]
+            因子名 → 滚动因子收益率序列。
+        """
+        fwd = returns_panel.shift(-forward_period)
+        result: dict[str, list] = {name: [] for name in factor_panels}
+        index: list = []
+
+        for date in returns_panel.index:
+            if date not in fwd.index:
+                continue
+            r_row = fwd.loc[date].dropna()
+            if len(r_row) < 20:
+                continue
+
+            date_results = {}
+            for name, panel in factor_panels.items():
+                if date not in panel.index:
+                    break
+                f_row = panel.loc[date].dropna()
+                common = f_row.index.intersection(r_row.index)
+                if len(common) >= 20:
+                    fr = FactorAnalyzer.calc_factor_return(f_row[common], r_row[common])
+                    date_results[name] = fr
+                else:
+                    break
+            else:
+                index.append(date)
+                for name in factor_panels:
+                    result[name].append(date_results.get(name, np.nan))
+
+        return {name: pd.Series(vals, index=pd.DatetimeIndex(index))
+                for name, vals in result.items()}
+
+    @staticmethod
+    def calc_rolling_fr_means(
+        fr_series_dict: dict[str, pd.Series],
+        current_date,
+        window: int = 60,
+    ) -> dict[str, float]:
+        """计算当前日期前 window 日的滚动因子收益率均值。
+
+        Parameters
+        ----------
+        fr_series_dict : dict
+            因子名 → 滚动因子收益率序列（来自 calc_rolling_factor_returns）。
+        current_date : Timestamp
+            当前日期。
+        window : int
+            回看窗口长度。
+
+        Returns
+        -------
+        dict[str, float]
+            因子名 → 滚动均值。
+        """
+        result = {}
+        for name, series in fr_series_dict.items():
+            past = series[series.index <= current_date].tail(window).dropna()
+            if len(past) > 0:
+                result[name] = float(past.mean())
+            else:
+                result[name] = 0.0
+        return result
+
+    @staticmethod
+    def combine_by_rolling_fr(
+        factors: dict[str, pd.Series],
+        fr_means: dict[str, float],
+    ) -> pd.Series:
+        """按滚动因子收益率加权合成多因子。
+
+        w_k = FR_k / Σ|FR_j|，权重与近期表现成正比。
+
+        Parameters
+        ----------
+        factors : dict
+            因子名 → 截面因子值 Series。
+        fr_means : dict
+            因子名 → 滚动因子收益率均值。
+
+        Returns
+        -------
+        Series
+            合成的 Alpha 预测值。
+        """
+        if not factors or not fr_means:
+            return pd.Series(dtype=float)
+
+        df = pd.DataFrame(factors)
+        df = (df - df.mean()) / (df.std() + 1e-10)
+
+        weights = pd.Series(fr_means)
+        total_abs = weights.abs().sum()
+        if total_abs == 0:
+            return df.mean(axis=1)
+        weights = weights / total_abs
+
+        return df.mul(weights, axis=1).sum(axis=1)

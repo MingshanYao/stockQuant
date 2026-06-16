@@ -2,6 +2,6 @@
 
 from .performance import PerformanceAnalyzer
 from .factor import FactorAnalyzer
-from .evaluator import FactorEvaluator
+from .evaluator import FactorEvaluator, close_pool
 
-__all__ = ["PerformanceAnalyzer", "FactorAnalyzer", "FactorEvaluator"]
+__all__ = ["PerformanceAnalyzer", "FactorAnalyzer", "FactorEvaluator", "close_pool"]

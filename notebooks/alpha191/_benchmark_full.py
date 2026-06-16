@@ -70,7 +70,7 @@ MIN_COVERAGE = 0.3
 valid_factors = {k: v for k, v in all_factors.items() if np.isfinite(v.values).mean() >= MIN_COVERAGE}
 evaluator = FactorEvaluator(close_panel=engine.close)
 named_factors = {f"Alpha{k:03d}": v for k, v in valid_factors.items()}
-system_eval = evaluator.evaluate_system(named_factors, forward_period=1, neutralize=False)
+system_eval = evaluator.evaluate_system(named_factors, forward_period=1)
 
 ic_sig = system_eval["ic_ir"].abs() > 0.5
 t_sig = system_eval["t_stat"].abs() > 2.0

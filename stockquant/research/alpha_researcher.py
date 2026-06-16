@@ -36,7 +36,7 @@ import pandas as pd
 
 from stockquant.backtest.engine import BacktestEngine
 from stockquant.analysis.performance import PerformanceAnalyzer
-from stockquant.strategy.alpha_factor_strategy import AlphaFactorStrategy
+from stockquant.strategy.alpha_factor_strategy import AlphaFactorStrategy, HAS_CVXPY
 from stockquant.utils.logger import get_logger
 
 if TYPE_CHECKING:
@@ -180,6 +180,11 @@ class AlphaResearcher:
         max_drawdown_green: float = 0.04,
         max_drawdown_yellow: float = 0.07,
         max_drawdown_orange: float = 0.10,
+        enable_style_neutral: bool | None = None,
+        industry_map: pd.Series | None = None,
+        market_cap: pd.Series | None = None,
+        transaction_cost: float = 0.003,
+        style_factors: dict[str, pd.DataFrame] | None = None,
     ) -> None:
         self.dataset = dataset
         self.benchmark_df = dataset.benchmark
@@ -194,13 +199,19 @@ class AlphaResearcher:
         self.max_drawdown_green = max_drawdown_green
         self.max_drawdown_yellow = max_drawdown_yellow
         self.max_drawdown_orange = max_drawdown_orange
+        self.enable_style_neutral = enable_style_neutral if enable_style_neutral is not None else HAS_CVXPY
+        self.industry_map = industry_map
+        self.market_cap = market_cap
+        self.transaction_cost = transaction_cost
+        self.style_factors = style_factors
 
         self._alpha_engine: "Alpha101Engine | None" = None
         self._alpha_cache: dict[int, pd.DataFrame] = {}
 
         logger.info(
             f"AlphaResearcher 初始化: {len(dataset.codes)} 只股票, "
-            f"max_pos={max_positions}, freq={rebalance_freq}"
+            f"max_pos={max_positions}, freq={rebalance_freq}, "
+            f"style_neutral={self.enable_style_neutral}"
         )
 
     # ==================================================================
@@ -318,6 +329,7 @@ class AlphaResearcher:
             enable_style_neutral=self.enable_style_neutral,
             industry_map=self.industry_map,
             market_cap=self.market_cap,
+            transaction_cost=self.transaction_cost,
         )
 
         # 构建回测引擎并设置初始资金

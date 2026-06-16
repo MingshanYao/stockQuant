@@ -2,8 +2,13 @@
 
 与 _run_notebook.py (CSI300 2022-2024) 对比，验证因子效果差异来源。
 """
+import gc
 import warnings
 warnings.filterwarnings("ignore")
+
+import multiprocessing
+import os
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 
 import pandas as pd
 import numpy as np
@@ -16,6 +21,18 @@ from stockquant.data.universe import Pool, StockUniverse
 from stockquant.indicators.alpha191 import Alpha191Indicators, SKIP_ALPHAS
 from stockquant.analysis.evaluator import FactorEvaluator
 from stockquant.research import AlphaResearcher
+
+# 模块级变量用于 fork 模式回测并行
+_backtest_dataset = None
+_backtest_params = None
+
+
+def _run_single_backtest(args: tuple):
+    """模块级函数：运行单个因子回测（用于 ProcessPoolExecutor fork）。"""
+    alpha_id, panel, label = args
+    researcher = AlphaResearcher(_backtest_dataset, **_backtest_params)
+    r = researcher.run_backtest(alpha_panel=panel, label=label)
+    return label, r
 
 plt.rcParams["font.sans-serif"] = ["SimHei", "Arial Unicode MS", "DejaVu Sans"]
 plt.rcParams["axes.unicode_minus"] = False
@@ -142,7 +159,7 @@ evaluator = FactorEvaluator(close_panel=engine.close)
 named_factors = {f"Alpha{k:03d}": v for k, v in valid_factors.items()}
 
 print(f"计算 {len(named_factors)} 个因子的 IC/ICIR (T+1)...")
-system_eval = evaluator.evaluate_system(named_factors, forward_period=1, neutralize=False)
+system_eval = evaluator.evaluate_system(named_factors, forward_period=1)
 print("✅ 完成")
 
 ic_cols = ["ic_mean", "ic_std", "ic_ir", "ic_pos_ratio", "n_periods"]
@@ -241,12 +258,35 @@ print(f"选取 Top {top_n} 因子（按 |IC|）做多周期检验:")
 print(f"  {', '.join(top_factors_by_ic[:10])}")
 print(f"  {', '.join(top_factors_by_ic[10:])}")
 
+# ── 预中性化因子 + 各周期 forward returns，消除重复 neutralize ──
+periods = [1, 2, 3, 4, 5]
+print(f"  预中性化 {top_n} 个因子 + {len(periods)} 周期 forward returns...", flush=True)
+top_neut = {n: evaluator._neutralize_panel(named_factors[n]) for n in top_factors_by_ic}
+fwd_neut_period = {p: evaluator._neutralize_panel(evaluator._forward_returns(p)) for p in periods}
+# 预排名 fwd（Spearman 专用）——每个周期 rank 一次，所有因子复用
+fwd_ranked_period = {p: panel.rank(axis=1) for p, panel in fwd_neut_period.items()}
+
+# 并行 evaluate（IC 走 numpy 快速路径，无 pandas corrwith GIL 竞争）
+def _eval_one(name, p):
+    return name, p, evaluator.evaluate(
+        named_factors[name], forward_period=p,
+        factor_neutral=top_neut[name], fwd_neutral=fwd_neut_period[p],
+        fwd_ranked=fwd_ranked_period[p],
+    )
+
 multi_horizon_results = {}
-for i, name in enumerate(top_factors_by_ic, 1):
-    print(f"  [{i}/{top_n}] 多周期评价: {name}...", end="\r")
-    result = evaluator.evaluate_multi_horizon(named_factors[name], periods=[1, 2, 3, 4, 5], neutralize=False)
-    multi_horizon_results[name] = result
-print(f"✅ 完成 {top_n} 个因子多周期评价              ")
+with ThreadPoolExecutor(max_workers=min(12, top_n * len(periods))) as ex:
+    futures = {}
+    for name in top_factors_by_ic:
+        for p in periods:
+            futures[ex.submit(_eval_one, name, p)] = (name, p)
+    for i, future in enumerate(as_completed(futures), 1):
+        name, p, result = future.result()
+        if name not in multi_horizon_results:
+            multi_horizon_results[name] = {}
+        multi_horizon_results[name][p] = result
+        print(f"  [{i}/{top_n * len(periods)}] {name} T+{p} IC={result['ic_mean']:.4f}", flush=True)
+print(f"✅ 完成 {top_n} 个因子多周期评价")
 
 ic_decay = pd.DataFrame({
     name: {f"T+{d}": metrics["ic_mean"] for d, metrics in horizons.items()}
@@ -304,7 +344,7 @@ print("第6章: 因子体系评价 — 完整四指标汇总")
 print("=" * 70)
 
 full_eval = system_eval.copy()
-full_eval.columns = ["IC均值", "IC标准差", "ICIR", "IC>0占比", "FR均值", "FR标准差", "FR_IR", "年化FR", "T统计量", "有效天数"]
+full_eval.columns = ["IC均值", "IC标准差", "ICIR", "IC>0占比", "FR均值", "FR标准差", "FR_IR", "年化FR", "T统计量", "有效天数", "覆盖率"]
 
 full_eval["IC显著"] = full_eval["ICIR"].abs() > 0.5
 full_eval["T显著"] = full_eval["T统计量"].abs() > 2.0
@@ -356,17 +396,97 @@ plt.close()
 print("📊 已保存: quadrant_scatter.png")
 
 # ======================================================================
-# 7. 因子去冗余 — Factor Return 相关矩阵
+# 6.5. 因子体系预测力 & 数量边际分析 & 覆盖率报告
+# ======================================================================
+print("\n" + "=" * 70)
+print("第6.5章: 因子体系预测力评估 & 数量边际分析 & 覆盖率报告")
+print("=" * 70)
+
+# ── 预中性化：收集所有候选因子 + forward returns，仅中性化一次 ──
+candidates = full_eval[full_eval["IC显著"] | full_eval["T显著"]]
+candidate_dict = {name: named_factors[name] for name in candidates.index if name in named_factors}
+print(f"\n预中性化 {len(candidate_dict)} 个候选因子 + forward returns（复用至 Ch7）...", flush=True)
+
+fwd_neut_cache = evaluator._neutralize_panel(evaluator._forward_returns(1))
+fwd_ranked_cache = fwd_neut_cache.rank(axis=1)  # 预排名供 Spearman 快速路径
+
+# 批量中性化——一次池提交处理所有因子，消除 O(F×C) 池任务洪水
+print(f"  批量中性化 {len(candidate_dict)} 个因子...", flush=True)
+neut_factors_cache = evaluator._neutralize_panels_batch(candidate_dict)
+gc.collect()
+print(f"✅ 预中性化完成: {len(neut_factors_cache)} 个因子\n", flush=True)
+
+# ── 6.5a 因子体系整体预测力（复用预中性化数据）──
+print("--- 因子体系整体预测力 (Model Predictive Power) ---")
+if neut_factors_cache:
+    model_ic = evaluator.evaluate_model_predictive_power(
+        candidate_dict,
+        forward_period=1,
+        neutralized_factors=neut_factors_cache,
+        fwd_neutral=fwd_neut_cache,
+        fwd_ranked=fwd_ranked_cache,
+    )
+    print(f"合成 Alpha 预测 IC: "
+          f"均值={model_ic.get('ic_mean', np.nan):.4f}, "
+          f"IR={model_ic.get('ic_ir', np.nan):.3f}, "
+          f"T={model_ic.get('t_stat', np.nan):.2f}, "
+          f"胜率={model_ic.get('ic_pos_ratio', np.nan):.1%}", flush=True)
+
+# ── 6.5b 因子数量边际分析（复用预中性化数据）──
+print("\n--- 因子数量边际分析 (Factor Count Analysis) ---")
+if len(neut_factors_cache) >= 2:
+    print("按 FR IR 降序分析因子数量边际贡献...", flush=True)
+    # 从已有 system_eval 获取 FR IR，跳过 O(F·d·s·k) 的 Phase 2 重算
+    fr_ir_map = system_eval["fr_ir"].abs().to_dict()
+    count_df = evaluator.factor_count_analysis(
+        candidate_dict,
+        forward_period=1,
+        neutralized_factors=neut_factors_cache,
+        fwd_neutral=fwd_neut_cache,
+        fr_ir_map=fr_ir_map,
+        fwd_ranked=fwd_ranked_cache,
+    )
+    print(count_df[["ic_mean", "ic_ir", "added_factor"]].to_string(
+        float_format=lambda x: f"{x:.4f}"))
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.plot(count_df.index, count_df["ic_ir"].values, "o-", color="#3498db", linewidth=2)
+    ax.axhline(0, color="red", linestyle="--", linewidth=0.8)
+    ax.set_xlabel("因子数量", fontsize=11)
+    ax.set_ylabel("合成 ICIR", fontsize=11)
+    ax.set_title("因子数量边际分析 — 按 FR IR 降序逐步增加", fontsize=13)
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(f"{OUTPUT_DIR}/factor_count_analysis.png", dpi=150, bbox_inches="tight")
+    plt.close()
+    print("📊 已保存: factor_count_analysis.png")
+
+# ── 6.5c 覆盖率报告 ──
+print("\n--- 因子覆盖率报告 ---")
+cov_report = evaluator.coverage_report(named_factors)
+print(f"最低覆盖率: {cov_report['min_coverage']:.1%}")
+print(f"中位覆盖率: {cov_report['median_coverage']:.1%}")
+print(f"最高覆盖率: {cov_report['max_coverage']:.1%}")
+low_factors = cov_report.get('low_coverage_factors', [])
+if low_factors:
+    print(f"低覆盖因子 (<30%): {len(low_factors)} 个")
+    for name, cov in low_factors[:10]:
+        print(f"  {name}: {cov:.1%}")
+
+# ======================================================================
+# 7. 因子去冗余 — Factor Return 相关矩阵（复用预中性化数据）
 # ======================================================================
 print("\n" + "=" * 70)
 print("第7章: 因子去冗余 — Factor Return 相关矩阵")
 print("=" * 70)
 
-candidates = full_eval[full_eval["IC显著"] | full_eval["T显著"]]
-if len(candidates) >= 2:
-    candidate_dict = {name: named_factors[name] for name in candidates.index if name in named_factors}
+if len(candidate_dict) >= 2:
     print(f"计算 {len(candidate_dict)} 个显著因子的 FR 相关矩阵...")
-    corr_matrix = evaluator.factor_correlation_matrix(candidate_dict, forward_period=1)
+    corr_matrix = evaluator.factor_correlation_matrix(
+        candidate_dict, forward_period=1,
+        neutralized_factors=neut_factors_cache,
+        fwd_neutral=fwd_neut_cache,
+    )
     print("✅ 完成")
 
     fig, ax = plt.subplots(figsize=(max(8, len(corr_matrix) * 0.5), max(6, len(corr_matrix) * 0.4)))
@@ -400,6 +520,13 @@ if len(candidates) >= 2:
 else:
     print("⚠️ 显著因子不足 2 个，跳过相关性分析")
 
+# ── 释放预中性化内存 + 关闭进程池，为 Ch8 回测腾出 RAM ──
+from stockquant.analysis.evaluator import close_pool
+del neut_factors_cache, fwd_neut_cache, fwd_ranked_cache
+close_pool()
+gc.collect()
+print("\n📦 已释放预中性化缓存 + 进程池\n")
+
 # ======================================================================
 # 8. 优质因子回测验证
 # ======================================================================
@@ -424,20 +551,36 @@ else:
 
 print(f"回测因子: {', '.join(top_backtest_ids)}")
 
-backtest_results = {}
-for i, name in enumerate(top_backtest_ids, 1):
-    print(f"[{i}/{len(top_backtest_ids)}] 回测 {name}...", end="")
-    try:
-        alpha_id = int(name.replace("Alpha", ""))
-        panel = all_factors[alpha_id]
-        r = researcher.run_backtest(alpha_panel=panel, label=name)
-        backtest_results[name] = r
-        az = r.get_analyzer()
-        print(f"  总收益: {az.total_return():+.2%}  夏普: {az.sharpe_ratio():.3f}")
-    except Exception as e:
-        print(f"  ⚠️ 失败: {e}")
+# 设置模块级变量用于 fork 并行
+_backtest_dataset = dataset
+_backtest_params = {
+    "initial_capital": INITIAL_CAPITAL,
+    "max_positions": MAX_POSITIONS,
+    "rebalance_freq": REBALANCE_FREQ,
+}
 
-print(f"\n✅ 完成 {len(backtest_results)}/{len(top_backtest_ids)} 个因子回测")
+backtest_items = []
+for name in top_backtest_ids:
+    alpha_id = int(name.replace("Alpha", ""))
+    panel = all_factors[alpha_id]
+    backtest_items.append((alpha_id, panel, name))
+
+backtest_results = {}
+max_w = min(max(os.cpu_count() - 2, 1), len(backtest_items))
+ctx = multiprocessing.get_context("fork")
+with ProcessPoolExecutor(max_workers=max_w, mp_context=ctx) as executor:
+    futures = {executor.submit(_run_single_backtest, item): item[2] for item in backtest_items}
+    for i, future in enumerate(as_completed(futures), 1):
+        try:
+            label, r = future.result()
+            backtest_results[label] = r
+            az = r.get_analyzer()
+            print(f"[{i}/{len(backtest_items)}] {label}: 总收益={az.total_return():+.2%}  夏普={az.sharpe_ratio():.3f}")
+        except Exception as e:
+            name = futures[future]
+            print(f"[{i}/{len(backtest_items)}] {name}: ⚠️ 失败: {e}")
+
+print(f"\n✅ 完成 {len(backtest_results)}/{len(backtest_items)} 个因子回测")
 
 if backtest_results:
     metrics = researcher.metrics_table(backtest_results)

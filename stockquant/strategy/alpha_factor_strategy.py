@@ -6,8 +6,12 @@
   2. 分级回撤预警（绿/黄/橙/红）→ 仓位压缩
   3. 个股止损/止盈（固定+移动止损）→ 单仓退出
 
-风格中性化（可选，需 cvxpy）：
-  使用线性规划优化器构建行业/市值中性组合。
+风格中性化（需 cvxpy）：
+  使用 cvxpy 优化器构建行业/市值中性的投资组合。
+  目标函数含换手率惩罚（国泰君安 Alpha191 方法论）：
+      Max  w'·α  -  (Tc/2)·Σ|w - w_prev|
+
+  支持单因子和多因子面板输入。
 """
 from __future__ import annotations
 
@@ -36,18 +40,21 @@ class AlphaFactorStrategy(BaseStrategy):
     """通用截面因子选股策略 — 集成完整回撤控制 + 风格中性组合。
 
     每隔 ``rebalance_freq`` 个交易日触发调仓。
-    风格中性化模式下，使用 cvxpy 优化器构建行业/市值中性的投资组合。
+    风格中性化模式下，使用 cvxpy 优化器构建含换手率惩罚的行业/市值中性组合。
 
     参数
     ----
-    alpha_panel    : DataFrame  **必填**
+    alpha_panel    : DataFrame or dict[str, DataFrame]  **必填**
+        单因子时传入 DataFrame（行=日期，列=股票），
+        多因子时传入 {name: DataFrame}，策略自动按等权/ICIR 合成。
     max_positions  : int = 50
     rebalance_freq : int = 5
     ascending      : bool = False
     label          : str = "AlphaFactor"
     enable_risk_mgmt : bool = False
-    enable_style_neutral : bool = False
-        使用 cvxpy 构建行业/市值中性组合（需要传入 industry_map 和 market_cap）。
+    enable_style_neutral : bool = True  (需 cvxpy)
+        使用 cvxpy 构建行业/市值中性组合（需传入 industry_map 和 market_cap）。
+    transaction_cost : float = 0.003 （Tc=0.3%，单边0.1%+印花税0.1%）
     industry_map : Series, optional
         股票代码 → 行业名称的映射。
     market_cap : Series, optional
@@ -61,7 +68,8 @@ class AlphaFactorStrategy(BaseStrategy):
     uses_lightweight_bar = True
 
     def initialize(self) -> None:
-        self._alpha_panel: pd.DataFrame = self.get_param("alpha_panel")
+        self._alpha_panel_raw = self.get_param("alpha_panel")
+        self._alpha_panel: pd.DataFrame = self._synthesize_alpha_panel(self._alpha_panel_raw)
         self._max_pos: int = self.get_param("max_positions", 50)
         self._freq: int = self.get_param("rebalance_freq", 5)
         self._ascending: bool = self.get_param("ascending", False)
@@ -72,11 +80,13 @@ class AlphaFactorStrategy(BaseStrategy):
         self._alpha_panel.index = pd.to_datetime(self._alpha_panel.index)
 
         # ── 风格中性化 ──
-        self._style_neutral: bool = self.get_param("enable_style_neutral", False)
+        self._style_neutral: bool = self.get_param("enable_style_neutral", HAS_CVXPY)
+        self._transaction_cost: float = self.get_param("transaction_cost", 0.003)
         self._industry_map: pd.Series | None = self.get_param("industry_map", None)
         self._market_cap: pd.Series | None = self.get_param("market_cap", None)
         self._industry_limit: float = self.get_param("industry_exposure_limit", 0.05)
         self._size_limit: float = self.get_param("size_exposure_limit", 0.1)
+        self._prev_weights: dict[str, float] = {}
 
         if self._style_neutral and not HAS_CVXPY:
             logger.warning(
@@ -87,7 +97,7 @@ class AlphaFactorStrategy(BaseStrategy):
 
         if self._style_neutral:
             logger.info(
-                f"[{self._label}] 风格中性化已启用 — "
+                f"[{self._label}] 风格中性化已启用 (Tc={self._transaction_cost:.3f}) — "
                 f"行业偏差≤{self._industry_limit:.0%}, "
                 f"市值偏差≤{self._size_limit:.1f}σ"
             )
@@ -100,17 +110,14 @@ class AlphaFactorStrategy(BaseStrategy):
             tp_pct: float = self.get_param("take_profit_pct", 0.20)
             ts_pct: float = self.get_param("trailing_stop_pct", 0.05)
 
-            # 感知层: 市场状态检测
             self._regime_detector = MarketRegimeDetector()
 
-            # 感知层: 分级回撤预警
             self._risk_monitor = RiskMonitor(
                 green_threshold=self.get_param("max_drawdown_green", 0.04),
                 yellow_threshold=self.get_param("max_drawdown_yellow", 0.07),
                 orange_threshold=self.get_param("max_drawdown_orange", 0.10),
             )
 
-            # 决策层: 个股止损/止盈
             self._stop_loss = StopLossManager()
             self._stop_loss.sl_enabled = True
             self._stop_loss.sl_method = "trailing"
@@ -139,27 +146,54 @@ class AlphaFactorStrategy(BaseStrategy):
             f"style_neutral={self._style_neutral}"
         )
 
+    @staticmethod
+    def _synthesize_alpha_panel(alpha_input) -> pd.DataFrame:
+        """多因子合成：dict[str, DataFrame] → 单一 Alpha 预测面板。
+
+        等权 Z-score 标准化后平均。空值跳过。
+        """
+        if isinstance(alpha_input, pd.DataFrame):
+            return alpha_input
+
+        if isinstance(alpha_input, dict):
+            if not alpha_input:
+                raise ValueError("alpha_panel 为空 dict")
+            panels = []
+            for name, panel in alpha_input.items():
+                panel = panel.copy()
+                z = (panel - panel.mean()) / (panel.std() + 1e-10)
+                panels.append(z)
+            return sum(panels) / len(panels)
+
+        raise TypeError(f"alpha_panel 类型错误: {type(alpha_input)}")
+
     # ------------------------------------------------------------------
     # 风格中性化组合构建
     # ------------------------------------------------------------------
 
-    def _build_skip_neutral(self, today_alpha: pd.Series) -> list[str]:
-        """简单取 Top-N，无行业/市值约束（回退方案）。"""
+    def _build_skip_neutral(self, today_alpha: pd.Series) -> dict[str, float]:
+        """简单取 Top-N 等权（回退方案）。"""
         if self._ascending:
-            return today_alpha.nsmallest(self._max_pos).index.tolist()
-        return today_alpha.nlargest(self._max_pos).index.tolist()
+            codes = today_alpha.nsmallest(self._max_pos).index.tolist()
+        else:
+            codes = today_alpha.nlargest(self._max_pos).index.tolist()
+        w = 1.0 / len(codes) if codes else 0.0
+        return {c: w for c in codes}
 
-    def _build_optimized_portfolio(self, today_alpha: pd.Series) -> list[str]:
-        """使用 cvxpy 构建行业/市值中性的优化组合。
+    def _build_optimized_portfolio(self, today_alpha: pd.Series) -> dict[str, float]:
+        """cvxpy 风格中性优化组合 — 含换手率惩罚。
 
-        约束：
+        国泰君安 Alpha191 目标函数:
+            Max  w'·α  -  (Tc/2)·Σ|w - w_prev|
+
+        约束:
           - 行业权重偏差 ≤ industry_exposure_limit
           - 市值 Z-score 偏差 ≤ size_exposure_limit
-          - 满仓投资
-          - 个股上限 = 1/max_positions
-          - 个股下限 = 0
+          - Σw ≤ 1.0, 0 ≤ w_i ≤ 1/max_positions
 
-        目标：maximize Σ w_i × factor_score_i
+        Returns
+        -------
+        dict[str, float]  股票代码 → 目标权重
         """
         if not HAS_CVXPY:
             return self._build_skip_neutral(today_alpha)
@@ -169,10 +203,10 @@ class AlphaFactorStrategy(BaseStrategy):
         n = len(codes)
 
         if n == 0:
-            return []
+            return {}
 
         if self._ascending:
-            scores = -scores  # 翻转方向，统一最大化
+            scores = -scores
 
         max_w = 1.0 / max(self._max_pos, 1)
 
@@ -184,7 +218,7 @@ class AlphaFactorStrategy(BaseStrategy):
                 industries = ind.unique()
                 for industry in industries:
                     mask = (ind == industry).values.astype(float)
-                    target_weight = mask.sum() / len(ind)  # 截面行业占比
+                    target_weight = mask.sum() / max(len(ind), 1)
                     lower = max(0, target_weight - self._industry_limit)
                     upper = min(1.0, target_weight + self._industry_limit)
                     industry_constraints.append((mask, lower, upper))
@@ -201,17 +235,21 @@ class AlphaFactorStrategy(BaseStrategy):
         # 构建 cvxpy 问题
         w = cp.Variable(n, nonneg=True)
         score_vec = scores.loc[codes].values.astype(float)
-        objective = cp.Maximize(score_vec @ w)
+        alpha_objective = score_vec @ w
+
+        # 换手率惩罚: (Tc/2)·Σ|w - w_prev|
+        prev_vec = np.array([self._prev_weights.get(c, 0.0) for c in codes])
+        turnover_cost = (self._transaction_cost / 2.0) * cp.sum(cp.abs(w - prev_vec))
+
+        objective = cp.Maximize(alpha_objective - turnover_cost)
 
         constraints = [cp.sum(w) <= 1.0, w <= max_w]
 
-        # 行业约束
         for mask, lower, upper in industry_constraints:
             industry_weight = mask @ w
             constraints.append(industry_weight >= lower)
             constraints.append(industry_weight <= upper)
 
-        # 市值约束
         if size_constraint is not None:
             size_exposure = size_constraint @ w
             constraints.append(size_exposure >= -self._size_limit)
@@ -229,8 +267,10 @@ class AlphaFactorStrategy(BaseStrategy):
             logger.warning(f"[{self._label}] cvxpy 未找到可行解，回退到简单 Top-N")
             return self._build_skip_neutral(today_alpha)
 
-        selected = [codes[i] for i in range(n) if w.value[i] > 1e-6]
-        return selected if selected else self._build_skip_neutral(today_alpha)
+        result = {codes[i]: float(w.value[i]) for i in range(n) if w.value[i] > 1e-6}
+        if not result:
+            return self._build_skip_neutral(today_alpha)
+        return result
 
     # ------------------------------------------------------------------
     # 仓位系数
@@ -287,8 +327,6 @@ class AlphaFactorStrategy(BaseStrategy):
         if position_scale <= 0:
             return
 
-        effective_target_pct = self._base_target_pct * position_scale
-
         # ── 1. 获取当日截面因子值 ──
         current_ts = pd.Timestamp(self.context.current_date)
         valid_idx = self._alpha_panel.index[self._alpha_panel.index <= current_ts]
@@ -301,32 +339,37 @@ class AlphaFactorStrategy(BaseStrategy):
             return
         today_alpha = today_alpha[available]
 
-        # ── 2. 选中个股（风格中性 or 简单 Top-N）──
+        # ── 2. 解优化组合权重 ──
         if self._style_neutral:
-            top_stocks = set(self._build_optimized_portfolio(today_alpha))
+            target_weights = self._build_optimized_portfolio(today_alpha)
         else:
-            if self._ascending:
-                top_stocks = set(today_alpha.nsmallest(self._max_pos).index.tolist())
-            else:
-                top_stocks = set(today_alpha.nlargest(self._max_pos).index.tolist())
+            target_weights = self._build_skip_neutral(today_alpha)
 
-        # ── 3. 卖出不在名单的持仓 ──
+        # ── 3. 卖出不在目标组合的持仓 / 调降超重仓位 ──
         for code, pos in list(self.context.positions.items()):
             if pos.quantity <= 0:
                 continue
-            if code not in top_stocks:
+            target_w = target_weights.get(code, 0.0) * position_scale
+            current_w = pos.quantity * pos.current_price / max(self.context.portfolio.total_value, 1)
+            if code not in target_weights or current_w > target_w * 1.1:
                 avail_qty = pos.quantity - pos.frozen
                 if avail_qty > 0:
                     self.sell(code, avail_qty, reason=f"{self._label}调仓-剔除")
 
-        # ── 4. 等权建仓 ──
-        for code in top_stocks:
+        # ── 4. 按优化权重建仓 ──
+        for code, weight in target_weights.items():
+            effective_w = weight * position_scale
+            if effective_w <= 0:
+                continue
             self.order_target_percent(
                 code,
-                effective_target_pct,
+                effective_w,
                 reason=f"{self._label}调仓-买入"
                 + (f"({alert_level.label}, scale={position_scale:.0%})" if self._risk_enabled else ""),
             )
+
+        # 更新上期权重（用于下期换手率惩罚）
+        self._prev_weights = target_weights
 
 
 StrategyRegistry.register("alpha_factor", AlphaFactorStrategy)

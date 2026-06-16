@@ -234,6 +234,7 @@ class StockUniverse:
         self._scope_labels: list[str] = []
         self._exclude_pools: list[Pool] = []
         self._exclude_codes: set[str] = set()
+        self._exclude_st: bool = True  # 默认过滤 ST 股票
 
     # ---------- lazy DataManager ----------
 
@@ -289,6 +290,22 @@ class StockUniverse:
         self._scope_codes = list(dict.fromkeys(self._scope_codes))
         return self
 
+    def filter_st(self, enabled: bool = True) -> StockUniverse:
+        """设置是否过滤 ST 股票（默认开启）。
+
+        Parameters
+        ----------
+        enabled : bool
+            True 过滤 ST，False 保留 ST。
+
+        Returns
+        -------
+        self
+            支持链式调用。
+        """
+        self._exclude_st = enabled
+        return self
+
     def exclude(self, *items: Pool | str) -> StockUniverse:
         """排除标的池或个股（多次调用累加）。
 
@@ -339,6 +356,10 @@ class StockUniverse:
         # 按个股代码排除
         if self._exclude_codes:
             result = [c for c in result if c not in self._exclude_codes]
+
+        # ST 过滤：通过数据库查询股票名称排除 ST
+        if self._exclude_st and result:
+            result = self._filter_st_codes(result)
 
         return result
 
@@ -480,6 +501,26 @@ class StockUniverse:
         """从全部 A 股中按代码前缀筛选。"""
         all_codes = self._get_all_a_codes()
         return [c for c in all_codes if c.startswith(prefixes)]
+
+    def _filter_st_codes(self, codes: list[str]) -> list[str]:
+        """从代码列表中过滤 ST 股票（按名称包含 'ST'）。"""
+        try:
+            df = self._dm.get_stock_list()
+            if df.empty:
+                return codes
+            st_codes = set(
+                df.loc[df["name"].str.contains("ST", case=False, na=False), "code"]
+                .astype(str).str.zfill(6)
+            )
+            before = len(codes)
+            result = [c for c in codes if c not in st_codes]
+            removed = before - len(result)
+            if removed:
+                logger.info(f"ST 过滤: 移除 {removed} 只")
+            return result
+        except Exception as e:
+            logger.debug(f"ST 过滤查询失败，跳过: {e}")
+            return codes
 
     # ------------------------------------------------------------------
     # 内部 — 基准加载
