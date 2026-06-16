@@ -119,7 +119,7 @@ evaluator = FactorEvaluator(close_panel=engine.close)
 named_factors = {f"Alpha{k:03d}": v for k, v in valid_factors.items()}
 
 print("  评价因子体系（IC / FR / T统计量）...")
-system_eval = evaluator.evaluate_system(named_factors, forward_period=1, neutralize=False)
+system_eval = evaluator.evaluate_system(named_factors, forward_period=1)
 
 # ======================================================================
 # 3. 筛选有效因子 & 去冗余 & 构建组合因子

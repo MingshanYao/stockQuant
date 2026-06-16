@@ -93,11 +93,11 @@ print("\n" + "=" * 70)
 print("第4章: IC / ICIR 分析")
 print("=" * 70)
 
-evaluator = FactorEvaluator(close_panel=engine.close)
+evaluator = FactorEvaluator(close_panel=engine.close, style_factors="auto")
 named_factors = {f"Alpha{k:03d}": v for k, v in valid_factors.items()}
 
 print(f"计算 {len(named_factors)} 个因子的 IC/ICIR (T+1)...")
-system_eval = evaluator.evaluate_system(named_factors, forward_period=1, neutralize=False)
+system_eval = evaluator.evaluate_system(named_factors, forward_period=1)
 print("✅ 完成")
 
 ic_cols = ["ic_mean", "ic_std", "ic_ir", "ic_pos_ratio", "n_periods"]
@@ -201,7 +201,7 @@ print(f"  {', '.join(top_factors_by_ic[10:])}")
 multi_horizon_results = {}
 for i, name in enumerate(top_factors_by_ic, 1):
     print(f"  [{i}/{top_n}] 多周期评价: {name}...", end="\r")
-    result = evaluator.evaluate_multi_horizon(named_factors[name], periods=[1, 2, 3, 4, 5], neutralize=False)
+    result = evaluator.evaluate_multi_horizon(named_factors[name], periods=[1, 2, 3, 4, 5])
     multi_horizon_results[name] = result
 print(f"✅ 完成 {top_n} 个因子多周期评价              ")
 

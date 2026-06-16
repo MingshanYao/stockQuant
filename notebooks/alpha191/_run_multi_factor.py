@@ -104,7 +104,7 @@ evaluator = FactorEvaluator(close_panel=engine.close)
 named_factors = {f"Alpha{k:03d}": v for k, v in valid_factors.items()}
 
 print("  评价因子体系（IC / FR / T统计量）...")
-system_eval = evaluator.evaluate_system(named_factors, forward_period=1, neutralize=False)
+system_eval = evaluator.evaluate_system(named_factors, forward_period=1)
 
 # ======================================================================
 # 3. 筛选有效因子 & 去冗余
@@ -238,7 +238,7 @@ print(f"\n  共 {len(combos)} 个组合策略")
 # 6. 评价组合因子 IC/ICIR
 # ======================================================================
 print("\n第6步: 评价组合因子 IC / ICIR...")
-combo_eval = evaluator.evaluate_system(combos, forward_period=1, neutralize=False)
+combo_eval = evaluator.evaluate_system(combos, forward_period=1)
 
 ic_cols = ["ic_mean", "ic_ir", "fr_annual", "t_stat"]
 combo_summary = combo_eval[ic_cols].copy()

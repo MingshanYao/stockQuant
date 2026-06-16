@@ -315,6 +315,9 @@ class AlphaResearcher:
             max_drawdown_green=self.max_drawdown_green,
             max_drawdown_yellow=self.max_drawdown_yellow,
             max_drawdown_orange=self.max_drawdown_orange,
+            enable_style_neutral=self.enable_style_neutral,
+            industry_map=self.industry_map,
+            market_cap=self.market_cap,
         )
 
         # 构建回测引擎并设置初始资金
@@ -467,10 +470,11 @@ class AlphaResearcher:
         self,
         factor_panel: pd.DataFrame,
         forward_period: int = 1,
-        neutralize: bool = False,
         **kwargs,
     ) -> dict[str, float]:
         """使用 FactorEvaluator 对因子面板做完整评价。
+
+        始终做风格中性化（alpha191 方法论）。
 
         Parameters
         ----------
@@ -478,8 +482,6 @@ class AlphaResearcher:
             因子面板（行=日期，列=股票代码）。
         forward_period : int
             前向收益天数，默认 1。
-        neutralize : bool
-            是否做风格正交化，默认 False。
 
         Returns
         -------
@@ -493,7 +495,6 @@ class AlphaResearcher:
         return ev.evaluate(
             factor_panel,
             forward_period=forward_period,
-            neutralize=neutralize,
             **kwargs,
         )
 
