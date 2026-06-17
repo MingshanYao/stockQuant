@@ -68,7 +68,29 @@ print(f"   {len(all_factors)} 个因子 ({t2-t1:.1f}s)", flush=True)
 print("3. 筛选有效因子 & 构建组合...", flush=True)
 MIN_COVERAGE = 0.3
 valid_factors = {k: v for k, v in all_factors.items() if np.isfinite(v.values).mean() >= MIN_COVERAGE}
-evaluator = FactorEvaluator(close_panel=engine.close)
+# ── 加载行业 & 市值 & 基准收益 ──
+stock_info_df = db.query("SELECT code, industry, float_cap FROM stock_info")
+if not stock_info_df.empty:
+    industry_map = stock_info_df.set_index("code")["industry"]
+    market_cap = stock_info_df.set_index("code")["float_cap"]
+else:
+    industry_map = None
+    market_cap = None
+
+benchmark_bars_eval = db.query(
+    "SELECT date, close FROM index_daily WHERE code='000905'"
+    " AND date>=? AND date<=? ORDER BY date",
+    [START_DATE, END_DATE],
+)
+benchmark_bars_eval["date"] = pd.to_datetime(benchmark_bars_eval["date"])
+benchmark_returns = benchmark_bars_eval.set_index("date")["close"].pct_change()
+
+evaluator = FactorEvaluator(
+    close_panel=engine.close,
+    industry=industry_map,
+    market_cap=market_cap,
+    benchmark_returns=benchmark_returns,
+)
 named_factors = {f"Alpha{k:03d}": v for k, v in valid_factors.items()}
 system_eval = evaluator.evaluate_system(named_factors, forward_period=1)
 

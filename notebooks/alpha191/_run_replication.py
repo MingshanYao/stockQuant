@@ -155,7 +155,33 @@ print("\n" + "=" * 70)
 print("第3章: IC / ICIR 分析")
 print("=" * 70)
 
-evaluator = FactorEvaluator(close_panel=engine.close)
+# ── 加载行业 & 市值数据（来自 stock_info 表）──
+stock_info_df = db.query("SELECT code, industry, float_cap FROM stock_info")
+if not stock_info_df.empty:
+    industry_map = stock_info_df.set_index("code")["industry"]
+    market_cap = stock_info_df.set_index("code")["float_cap"]
+    print(f"  行业映射: {industry_map.nunique()} 个行业, {len(industry_map)} 只股票")
+else:
+    industry_map = None
+    market_cap = None
+    print("  ⚠️ stock_info 为空，行业/市值因子将不可用")
+
+# ── 加载基准收益（用于 Beta 计算）──
+benchmark_bars_eval = db.query(
+    "SELECT date, close FROM index_daily WHERE code = '000905'"
+    " AND date >= ? AND date <= ? ORDER BY date",
+    [START_DATE, END_DATE],
+)
+benchmark_bars_eval["date"] = pd.to_datetime(benchmark_bars_eval["date"])
+benchmark_returns = benchmark_bars_eval.set_index("date")["close"].pct_change()
+print(f"  基准收益: {len(benchmark_returns.dropna())} 个交易日")
+
+evaluator = FactorEvaluator(
+    close_panel=engine.close,
+    industry=industry_map,
+    market_cap=market_cap,
+    benchmark_returns=benchmark_returns,
+)
 named_factors = {f"Alpha{k:03d}": v for k, v in valid_factors.items()}
 
 print(f"计算 {len(named_factors)} 个因子的 IC/ICIR (T+1)...")

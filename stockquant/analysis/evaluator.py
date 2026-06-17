@@ -334,7 +334,7 @@ def _neutralize_chunk_batch(args: tuple) -> dict:
 
         X_full: pd.DataFrame | None = None
         if design_parts:
-            X_full = pd.concat(design_parts, axis=1)
+            X_full = pd.concat(design_parts, axis=1).dropna()
 
         # ── 对每个因子做 OLS 残差化 ──
         for name, panel in panel_dict.items():

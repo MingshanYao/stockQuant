@@ -107,7 +107,29 @@ wall_clock(f"Phase 1 完成: 因子计算 {time.monotonic() - t0:.2f}s")
 # Phase 2: evaluate_system (IC + FR)
 # ═══════════════════════════════════════════════════════════════
 t0 = time.monotonic()
-evaluator = FactorEvaluator(close_panel=engine.close)
+# ── 加载行业 & 市值 & 基准收益 ──
+stock_info_df = db.query("SELECT code, industry, float_cap FROM stock_info")
+if not stock_info_df.empty:
+    industry_map = stock_info_df.set_index("code")["industry"]
+    market_cap = stock_info_df.set_index("code")["float_cap"]
+else:
+    industry_map = None
+    market_cap = None
+
+benchmark_bars_eval = db.query(
+    "SELECT date, close FROM index_daily WHERE code = '000905'"
+    " AND date >= ? AND date <= ? ORDER BY date",
+    [START_DATE, END_DATE],
+)
+benchmark_bars_eval["date"] = pd.to_datetime(benchmark_bars_eval["date"])
+benchmark_returns = benchmark_bars_eval.set_index("date")["close"].pct_change()
+
+evaluator = FactorEvaluator(
+    close_panel=engine.close,
+    industry=industry_map,
+    market_cap=market_cap,
+    benchmark_returns=benchmark_returns,
+)
 t_ctor = time.monotonic() - t0
 print(f"  FactorEvaluator 构造: {t_ctor:.2f}s (含 BARRA 风格因子计算)")
 
