@@ -26,7 +26,10 @@ from stockquant.data.data_source import (
     standardize_daily,
     standardize_index,
 )
-from stockquant.utils.helpers import normalize_stock_code, ensure_date, split_list
+from stockquant.utils.helpers import (
+    normalize_stock_code, ensure_date, split_list,
+    RateLimiter, call_with_retries,
+)
 from stockquant.utils.logger import get_logger
 
 logger = get_logger("data.tickflow")
@@ -64,6 +67,8 @@ class TickFlowDataSource(BaseDataSource):
     def __init__(self) -> None:
         self._client = None
         self._industry_map: dict[str, str] | None = None
+        # TickFlow 免费层: 60 req/min → 1 req/s, burst=60 支持冷启动快速拉取
+        self._rate_limiter = RateLimiter(rate=1.0, burst=60)
 
     @property
     def client(self):
@@ -77,6 +82,7 @@ class TickFlowDataSource(BaseDataSource):
     def get_stock_list(self) -> pd.DataFrame:
         """从 CN_Equity_A universe + instruments.batch 获取全量 A 股列表。"""
         logger.info("获取全量 A 股列表...")
+        self._throttle()
         universe = self.client.universes.get("CN_Equity_A")
         symbols = universe.get("symbols", [])
         if not symbols:
@@ -84,6 +90,7 @@ class TickFlowDataSource(BaseDataSource):
 
         rows = []
         for chunk in split_list(symbols, 1000):
+            self._throttle()
             try:
                 insts = self.client.instruments.batch(chunk)
             except Exception:
@@ -105,12 +112,14 @@ class TickFlowDataSource(BaseDataSource):
             return self._industry_map
 
         logger.info("加载 Shenwan SW1 行业分类...")
+        self._throttle()
         univ_list = self.client.universes.list()
         sw1_ids = [u["id"] for u in univ_list if "SW1" in u.get("id", "")]
 
         # 使用 batch 接口避免逐个查询触发频率限制
         industry_map: dict[str, str] = {}
         for chunk_ids in split_list(sw1_ids, 50):
+            self._throttle()
             try:
                 batch_result = self.client.universes.batch(chunk_ids)
             except Exception:
@@ -135,11 +144,13 @@ class TickFlowDataSource(BaseDataSource):
         industry_map = self._load_industry_map()
 
         logger.info("获取标的信息...")
+        self._throttle()
         universe = self.client.universes.get("CN_Equity_A")
         all_symbols = universe.get("symbols", [])
 
         rows = []
         for chunk in split_list(all_symbols, 1000):
+            self._throttle()
             try:
                 insts = self.client.instruments.batch(chunk)
             except Exception:
@@ -186,8 +197,9 @@ class TickFlowDataSource(BaseDataSource):
         adjust_map = {"qfq": "forward", "hfq": "backward", "none": "none"}
         tf_adjust = adjust_map.get(adjust, "backward")
 
-        try:
-            df = self.client.klines.get(
+        def _fetch() -> pd.DataFrame:
+            self._throttle()
+            return self.client.klines.get(
                 tf_sym,
                 period="1d",
                 count=count,
@@ -196,6 +208,9 @@ class TickFlowDataSource(BaseDataSource):
                 adjust=tf_adjust,
                 as_dataframe=True,
             )
+
+        try:
+            df = call_with_retries(_fetch, attempts=3, label=f"TickFlow K线 {code}")
         except Exception as e:
             logger.warning(f"TickFlow K线获取失败 {code}: {e}")
             return pd.DataFrame()
@@ -233,8 +248,9 @@ class TickFlowDataSource(BaseDataSource):
         days = max((ed - sd).days + 1, 1)
         count = min(days * 2, 10000)
 
-        try:
-            df = self.client.klines.get(
+        def _fetch() -> pd.DataFrame:
+            self._throttle()
+            return self.client.klines.get(
                 tf_sym,
                 period="1d",
                 count=count,
@@ -242,6 +258,9 @@ class TickFlowDataSource(BaseDataSource):
                 end_time=_date_to_ms(ed),
                 as_dataframe=True,
             )
+
+        try:
+            df = call_with_retries(_fetch, attempts=3, label=f"TickFlow 指数K线 {code}")
         except Exception as e:
             logger.warning(f"TickFlow 指数K线获取失败 {code}: {e}")
             return pd.DataFrame()

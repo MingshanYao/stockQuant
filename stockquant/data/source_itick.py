@@ -23,7 +23,10 @@ from stockquant.data.data_source import (
     standardize_daily,
     standardize_index,
 )
-from stockquant.utils.helpers import normalize_stock_code, ensure_date
+from stockquant.utils.helpers import (
+    normalize_stock_code, ensure_date,
+    RateLimiter, call_with_retries,
+)
 from stockquant.utils.logger import get_logger
 
 logger = get_logger("data.itick")
@@ -51,16 +54,35 @@ class ITickDataSource(BaseDataSource):
         self._session = requests.Session()
         self._session.verify = False
         urllib3.disable_warnings()
+        # iTick: 5 req/s, burst=10 支持短时突发
+        self._rate_limiter = RateLimiter(rate=5.0, burst=10)
 
     def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
-        url = f"{ITICK_BASE_URL}{path}"
-        headers = {"accept": "application/json", "token": self._token}
-        resp = self._session.get(url, params=params or {}, headers=headers, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-        if data.get("code") != 0:
-            raise RuntimeError(f"iTick {path} 错误 [{data.get('code')}]: {data.get('msg')}")
-        return data.get("data")
+        def _call() -> Any:
+            self._throttle()
+            url = f"{ITICK_BASE_URL}{path}"
+            headers = {"accept": "application/json", "token": self._token}
+            resp = self._session.get(url, params=params or {}, headers=headers, timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+            if data.get("code") != 0:
+                raise RuntimeError(
+                    f"iTick {path} 错误 [{data.get('code')}]: {data.get('msg')}"
+                )
+            return data.get("data")
+
+        def _is_rate_limit(exc: Exception) -> bool:
+            """检测 HTTP 429 限流错误。"""
+            if hasattr(exc, "response") and getattr(exc.response, "status_code", 0) == 429:
+                return True
+            msg = str(exc).lower()
+            return "429" in msg or "rate limit" in msg or "too many" in msg
+
+        return call_with_retries(
+            _call, attempts=3, delay=2.0, backoff=2.0,
+            is_rate_limit=_is_rate_limit, rate_limit_wait=15.0,
+            label=f"iTick {path}",
+        )
 
     # ------------------------------------------------------------------
     def get_stock_list(self) -> pd.DataFrame:

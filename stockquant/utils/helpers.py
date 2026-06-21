@@ -70,6 +70,74 @@ def split_list(lst: Sequence, chunk_size: int) -> list[list]:
     return [list(lst[i: i + chunk_size]) for i in range(0, len(lst), chunk_size)]
 
 
+# ======================================================================
+# Token Bucket 限速器
+# ======================================================================
+
+class RateLimiter:
+    """Token Bucket 限速器，线程安全。
+
+    允许短时突发（桶内有攒的令牌时），长期平均速率严格受限。
+
+    Parameters
+    ----------
+    rate : float
+        令牌补充速率（个/秒）。
+    burst : int
+        桶容量（最大积攒令牌数），默认等于 rate 的整数值（最小 1）。
+
+    Examples
+    --------
+    >>> limiter = RateLimiter(rate=1.0, burst=60)  # 60 次/分钟
+    >>> for i in range(100):
+    ...     limiter.acquire()  # 前 60 个瞬间通过，之后每秒放行 1 个
+    ...     make_api_call()
+    """
+
+    def __init__(self, rate: float, burst: int | None = None) -> None:
+        if rate <= 0:
+            raise ValueError(f"rate must be > 0, got {rate}")
+        self._rate = float(rate)
+        self._burst = burst if burst is not None else max(int(rate), 1)
+        self._tokens = float(self._burst)  # 初始满桶
+        self._last_refill = time.monotonic()
+        self._lock = __import__("threading").Lock()
+
+    @property
+    def rate(self) -> float:
+        return self._rate
+
+    @property
+    def burst(self) -> int:
+        return self._burst
+
+    def acquire(self) -> float:
+        """获取一个令牌，阻塞直到可用。
+
+        Returns
+        -------
+        float
+            实际等待的秒数（0 表示立即可用）。
+        """
+        with self._lock:
+            now = time.monotonic()
+            elapsed = now - self._last_refill
+            self._tokens = min(self._burst, self._tokens + elapsed * self._rate)
+            self._last_refill = now
+
+            if self._tokens >= 1.0:
+                self._tokens -= 1.0
+                return 0.0
+
+            # 需要等待的时间
+            wait = (1.0 - self._tokens) / self._rate
+            self._tokens = 0.0
+            self._last_refill += wait
+
+        time.sleep(wait)
+        return wait
+
+
 def call_with_retries(
     fn: Callable[[], T],
     attempts: int = 3,
@@ -77,9 +145,11 @@ def call_with_retries(
     backoff: float = 2.0,
     *,
     on_error: Callable[[Exception, int], None] | None = None,
+    is_rate_limit: Callable[[Exception], bool] | None = None,
+    rate_limit_wait: float = 65.0,
     label: str = "调用",
 ) -> T:
-    """带指数退避的重试。
+    """带指数退避的重试，支持限流错误特殊处理。
 
     Parameters
     ----------
@@ -93,6 +163,11 @@ def call_with_retries(
         每次失败后等待时间的倍数因子。
     on_error : Callable[[Exception, int], None], optional
         每次失败的钩子，参数为 ``(exc, attempt_number)``；默认仅 WARNING 日志。
+    is_rate_limit : Callable[[Exception], bool], optional
+        判断异常是否为限流错误的钩子。限流错误不按指数退避，
+        而是等待 ``rate_limit_wait`` 秒后重试（默认 65s，超过 1 分钟窗口）。
+    rate_limit_wait : float
+        限流错误的等待秒数，默认 65。
     label : str
         日志中显示的任务标签。
 
@@ -119,7 +194,18 @@ def call_with_retries(
                 on_error(e, i)
             else:
                 logger.warning(f"[{label}] 第 {i}/{attempts} 次失败: {e}")
-            if i < attempts:
+
+            if i >= attempts:
+                break
+
+            if is_rate_limit is not None and is_rate_limit(e):
+                logger.info(
+                    f"[{label}] 检测到限流，等待 {rate_limit_wait:.0f}s 后重试"
+                    f" ({i + 1}/{attempts})"
+                )
+                time.sleep(rate_limit_wait)
+                cur_delay = delay  # 重置退避，限流等待已足够
+            else:
                 time.sleep(cur_delay)
                 cur_delay *= backoff
     assert last_exc is not None

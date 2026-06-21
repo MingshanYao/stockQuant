@@ -15,6 +15,8 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 
+from stockquant.utils.helpers import RateLimiter
+
 if TYPE_CHECKING:
     import datetime as dt
 
@@ -89,7 +91,24 @@ def standardize_index(df: pd.DataFrame, code: str) -> pd.DataFrame:
 # ======================================================================
 
 class BaseDataSource(ABC):
-    """数据源抽象基类。"""
+    """数据源抽象基类。
+
+    子类可在 ``__init__`` 中设置 ``_rate_limiter`` 以启用请求限速。
+    """
+
+    _rate_limiter: RateLimiter | None = None
+
+    def _throttle(self) -> float:
+        """若配置了限速器，阻塞直到允许下一次请求。
+
+        Returns
+        -------
+        float
+            实际等待的秒数（0 表示无需等待）。
+        """
+        if self._rate_limiter is not None:
+            return self._rate_limiter.acquire()
+        return 0.0
 
     @abstractmethod
     def get_stock_list(self) -> pd.DataFrame:
