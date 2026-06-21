@@ -144,8 +144,8 @@ class TestRateLimiter:
     def test_rate_limiter_initialized(self):
         src = BaoStockDataSource()
         assert src._rate_limiter is not None
-        assert src._rate_limiter.rate == 0.57
-        assert src._rate_limiter.burst == 100
+        assert src._rate_limiter.rate == 16.0
+        assert src._rate_limiter.burst == 200
 
 
 # ======================================================================
@@ -330,7 +330,8 @@ class TestGetStockInfoIntegration:
         df = src.get_stock_info()
         assert not df.empty, "stock_info 不应为空"
         expected_cols = {"code", "name", "industry", "sector", "market",
-                         "list_date", "total_shares", "float_shares", "total_cap", "float_cap"}
+                         "list_date", "total_shares", "float_shares", "total_cap", "float_cap",
+                         "out_date", "status", "industry_source"}
         assert expected_cols == set(df.columns), f"列不匹配: {set(df.columns)}"
         assert len(df) > 3000, f"股票数量应 > 3000，实际 {len(df)}"
 

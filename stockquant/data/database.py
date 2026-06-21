@@ -146,6 +146,8 @@ class Database:
             "out_date": "DATE",
             "status": "INTEGER",
             "industry_source": "VARCHAR",
+            "data_start": "DATE",
+            "data_end": "DATE",
         }
         try:
             existing = {
@@ -325,6 +327,74 @@ class Database:
             return str(result[0]) if result and result[0] else None
         except Exception:
             return None
+
+    def refresh_daily_date_ranges(self, codes: list[str] | None = None) -> int:
+        """从 daily_bars 聚合更新 stock_info 的 data_start / data_end。
+
+        Parameters
+        ----------
+        codes : list[str], optional
+            限定代码范围。None 时刷新全部。
+
+        Returns
+        -------
+        int
+            更新的 stock_info 行数。
+        """
+        if not self.table_exists("daily_bars") or not self.table_exists("stock_info"):
+            return 0
+
+        where_clause = ""
+        params: list[Any] = []
+        if codes:
+            placeholders = ", ".join("?" * len(codes))
+            where_clause = f"AND s.code IN ({placeholders})"
+            params = [str(c).zfill(6) for c in codes]
+
+        try:
+            result = self.conn.execute(
+                f"""
+                UPDATE stock_info s
+                SET data_start = d.min_date, data_end = d.max_date
+                FROM (
+                    SELECT code, MIN(date) AS min_date, MAX(date) AS max_date
+                    FROM daily_bars
+                    GROUP BY code
+                ) d
+                WHERE s.code = d.code {where_clause}
+                """,
+                params,
+            )
+            n = result.fetchall()[0][0] if result else 0
+            if n > 0:
+                logger.info(f"日期范围刷新: {n} 只股票")
+            return n
+        except Exception as e:
+            logger.warning(f"日期范围刷新失败: {e}")
+            return 0
+
+    def get_date_ranges(self) -> dict[str, tuple]:
+        """获取所有股票的日线日期范围。
+
+        Returns
+        -------
+        dict[str, tuple[date | None, date | None]]
+            {code: (data_start, data_end)}，未初始化的股票值为 None。
+        """
+        if not self.table_exists("stock_info"):
+            return {}
+
+        try:
+            result = self.conn.execute(
+                "SELECT code, data_start, data_end FROM stock_info"
+            ).fetchall()
+            ranges: dict[str, tuple] = {}
+            for code, ds, de in result:
+                ranges[str(code)] = (ds, de)
+            return ranges
+        except Exception as e:
+            logger.warning(f"获取日期范围失败: {e}")
+            return {}
 
     def _row_count(self, table: str) -> int:
         row = self.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()

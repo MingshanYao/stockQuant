@@ -281,6 +281,12 @@ class DataUpdater:
         if cap_cols and df[cap_cols].isna().all().all():
             n_cap = self.update_market_cap()
             logger.info(f"市值补齐完成: {n_cap} 只")
+
+        # truncate + insert 会清空 data_start/data_end，从 daily_bars 恢复
+        n_range = self.db.refresh_daily_date_ranges()
+        if n_range > 0:
+            logger.info(f"日期范围恢复: {n_range} 只")
+
         return rows
 
     def update_market_cap(self) -> int:
@@ -451,9 +457,25 @@ class DataUpdater:
         self,
         code: str,
         user_start: str | dt.date | None,
+        date_ranges: dict[str, tuple] | None = None,
     ) -> dt.date:
-        """决定某只股票的拉取起始日期（增量更新）。"""
+        """决定某只股票的拉取起始日期（增量更新）。
+
+        优先使用预加载的 date_ranges（O(1) 查 stock_info.data_end），
+        fallback 到 SELECT MAX(date) 查询。
+        """
         if user_start is None:
+            # 快速路径：从 stock_info 预加载的日期范围取 data_end
+            if date_ranges is not None:
+                entry = date_ranges.get(code)
+                if entry is not None:
+                    _, de = entry
+                    if de is not None:
+                        de_date = ensure_date(de)
+                        if de_date:
+                            return de_date + dt.timedelta(days=1)
+
+            # 慢速路径：直接查 daily_bars
             latest = self.db.get_latest_date("daily_bars", code)
             if latest:
                 latest_date = ensure_date(latest)
@@ -493,6 +515,9 @@ class DataUpdater:
         end_date = ensure_date(end_date) or dt.date.today()
         codes = [normalize_stock_code(c) for c in codes]
 
+        # 预加载全量日期范围（O(1) 查 data_end，替代 N 次 SELECT MAX 查询）
+        date_ranges = self.db.get_date_ranges()
+
         results: dict[str, int] = {}
         failed: list[str] = []
 
@@ -501,7 +526,7 @@ class DataUpdater:
         q_maxsize = int(self.cfg.get("data_fetch.queue_maxsize", 200))
 
         def _fetch(code: str) -> pd.DataFrame:
-            sd = self._resolve_start_date(code, start_date)
+            sd = self._resolve_start_date(code, start_date, date_ranges=date_ranges)
             if sd > end_date:
                 return pd.DataFrame()
             return self._source.get_daily_bars(code, sd, end_date, adjust)
@@ -513,7 +538,6 @@ class DataUpdater:
                 failed.append(code)
                 logger.warning(f"{code} 拉取出错: {err}")
                 return
-            # 拉取无异常但返回空 DataFrame 视为失败，不再静默计入"成功"
             if df is None or df.empty:
                 failed.append(code)
                 logger.warning(f"{code} 返回空数据")
@@ -536,6 +560,11 @@ class DataUpdater:
             progress_interval=100,
             label="日线更新",
         )
+
+        # 批量刷新日期范围（一次 SQL 替代逐条 UPDATE）
+        written_codes = list(results.keys())
+        if written_codes:
+            self.db.refresh_daily_date_ranges(written_codes)
 
         logger.info(
             f"批量更新完成: 共 {total} 只, 成功 {len(results)}, "
