@@ -234,7 +234,9 @@ class StockUniverse:
         self._scope_labels: list[str] = []
         self._exclude_pools: list[Pool] = []
         self._exclude_codes: set[str] = set()
-        self._exclude_st: bool = True  # 默认过滤 ST 股票
+        self._exclude_st: bool = True                # 默认过滤 ST 股票
+        self._exclude_delisted: bool = True          # 默认过滤退市股票
+        self._exclude_empty_industry: bool = True    # 默认过滤空行业股票
 
     # ---------- lazy DataManager ----------
 
@@ -306,6 +308,45 @@ class StockUniverse:
         self._exclude_st = enabled
         return self
 
+    def filter_delisted(self, enabled: bool = True) -> StockUniverse:
+        """设置是否过滤退市股票（默认开启）。
+
+        依赖 stock_info 表的 status 列（0=退市, 1=上市）。
+        若 stock_info 表无数据，则跳过过滤。
+
+        Parameters
+        ----------
+        enabled : bool
+            True 过滤退市股票，False 保留。
+
+        Returns
+        -------
+        self
+            支持链式调用。
+        """
+        self._exclude_delisted = enabled
+        return self
+
+    def filter_empty_industry(self, enabled: bool = True) -> StockUniverse:
+        """设置是否过滤空行业股票（默认开启）。
+
+        依赖 stock_info 表的 industry 列。
+        行业为空/NaN 的股票（多为退市/历史遗留）将被排除。
+        若 stock_info 表无数据，则跳过过滤。
+
+        Parameters
+        ----------
+        enabled : bool
+            True 过滤空行业，False 保留。
+
+        Returns
+        -------
+        self
+            支持链式调用。
+        """
+        self._exclude_empty_industry = enabled
+        return self
+
     def exclude(self, *items: Pool | str) -> StockUniverse:
         """排除标的池或个股（多次调用累加）。
 
@@ -360,6 +401,14 @@ class StockUniverse:
         # ST 过滤：通过数据库查询股票名称排除 ST
         if self._exclude_st and result:
             result = self._filter_st_codes(result)
+
+        # 退市过滤：通过 stock_info.status 排除退市股
+        if self._exclude_delisted and result:
+            result = self._filter_delisted_codes(result)
+
+        # 空行业过滤：通过 stock_info.industry 排除无行业分类的股票
+        if self._exclude_empty_industry and result:
+            result = self._filter_empty_industry_codes(result)
 
         return result
 
@@ -520,6 +569,48 @@ class StockUniverse:
             return result
         except Exception as e:
             logger.debug(f"ST 过滤查询失败，跳过: {e}")
+            return codes
+
+    def _filter_delisted_codes(self, codes: list[str]) -> list[str]:
+        """从代码列表中过滤退市股票（stock_info.status == 0）。"""
+        try:
+            info_df = self._dm.get_stock_info(codes)
+            if info_df.empty or "status" not in info_df.columns:
+                return codes
+            delisted = set(
+                info_df.loc[info_df["status"] == 0, "code"]
+                .astype(str).str.zfill(6)
+            )
+            before = len(codes)
+            result = [c for c in codes if c not in delisted]
+            removed = before - len(result)
+            if removed:
+                logger.info(f"退市过滤: 移除 {removed} 只")
+            return result
+        except Exception as e:
+            logger.debug(f"退市过滤查询失败，跳过: {e}")
+            return codes
+
+    def _filter_empty_industry_codes(self, codes: list[str]) -> list[str]:
+        """从代码列表中过滤行业信息为空的股票。"""
+        try:
+            info_df = self._dm.get_stock_info(codes)
+            if info_df.empty or "industry" not in info_df.columns:
+                return codes
+            empty_ind = set(
+                info_df.loc[
+                    info_df["industry"].isna() | (info_df["industry"] == ""),
+                    "code",
+                ].astype(str).str.zfill(6)
+            )
+            before = len(codes)
+            result = [c for c in codes if c not in empty_ind]
+            removed = before - len(result)
+            if removed:
+                logger.info(f"空行业过滤: 移除 {removed} 只")
+            return result
+        except Exception as e:
+            logger.debug(f"空行业过滤查询失败，跳过: {e}")
             return codes
 
     # ------------------------------------------------------------------

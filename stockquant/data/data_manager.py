@@ -217,6 +217,53 @@ class DataManager:
         return self.db.query(sql, params)
 
     # ------------------------------------------------------------------
+    # 财务数据查询
+    # ------------------------------------------------------------------
+
+    def get_financials(
+        self,
+        code: str | None = None,
+        start_date: str | dt.date | None = None,
+        end_date: str | dt.date | None = None,
+        fields: list[str] | None = None,
+    ) -> pd.DataFrame:
+        """从本地数据库查询季频财务数据。
+
+        Parameters
+        ----------
+        code : str, optional
+            股票代码。省略时查询全部。
+        start_date / end_date : str | date, optional
+            report_date 范围过滤。
+        fields : list[str], optional
+            要返回的列。省略时返回全部列。
+
+        Returns
+        -------
+        DataFrame
+        """
+        if not self.db.table_exists("financials"):
+            logger.warning("financials 表不存在，请先运行 DataUpdater.update_financials()")
+            return pd.DataFrame()
+
+        cols = ", ".join(fields) if fields else "*"
+        sql = f"SELECT {cols} FROM financials WHERE 1=1"
+        params: list[object] = []
+
+        if code:
+            sql += " AND code = ?"
+            params.append(normalize_stock_code(code))
+        if start_date:
+            sql += " AND report_date >= ?"
+            params.append(str(ensure_date(start_date)))
+        if end_date:
+            sql += " AND report_date <= ?"
+            params.append(str(ensure_date(end_date)))
+
+        sql += " ORDER BY code, report_date"
+        return self.db.query(sql, params)
+
+    # ------------------------------------------------------------------
     # 内部方法
     # ------------------------------------------------------------------
 

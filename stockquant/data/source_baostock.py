@@ -37,6 +37,7 @@ logger = get_logger("data.baostock")
 STOCK_INFO_COLS = [
     "code", "name", "industry", "sector", "market",
     "list_date", "total_shares", "float_shares", "total_cap", "float_cap",
+    "out_date", "status", "industry_source",
 ]
 
 # 复权映射：标准名 → BaoStock adjustflag
@@ -380,56 +381,226 @@ class BaoStockDataSource(BaseDataSource):
 
     # ------------------------------------------------------------------
     def get_stock_info(self) -> pd.DataFrame:
-        """获取全市场股票基本信息（申万一级行业 + 代码/名称/上市日期）。
+        """获取全市场股票基本信息（CSRC 行业分类 + 退市标记 + 上市日期）。
 
-        市值/股本字段留空（BaoStock 不提供）。
+        从 ``query_stock_basic`` 取证券基本资料（含退市日期/状态），
+        从 ``query_stock_industry``（不传 code）取全量 CSRC 行业分类，
+        合并后输出标准列。市值/股本字段留空，由 DataUpdater 后续补齐。
         """
-        logger.info("获取全量 A 股股票基本信息...")
+        logger.info("通过 BaoStock 获取全市场股票基本信息...")
 
-        # Step 1: 行业分类（申万一级）
-        logger.info("  拉取申万一级行业分类...")
+        # Step 1: 行业分类（全量，CSRC 证监会分类）
+        logger.info("  拉取行业分类（query_stock_industry 全量）...")
         industry_df = self._query(
             bs.query_stock_industry,
-            label="行业分类",
+            label="行业分类(全量)",
         )
-        # industry_df columns: updateDate, code, code_name, industry, industryClassification
+        industry_map: dict[str, str] = {}
         if not industry_df.empty and "code" in industry_df.columns:
-            industry_map = dict(zip(
-                industry_df["code"].str.split(".").str[1],
-                industry_df["industry"],
-            ))
-        else:
-            industry_map = {}
-        logger.info(f"  {len(industry_map)} 只股票有行业信息")
+            for _, row in industry_df.iterrows():
+                c = normalize_stock_code(str(row["code"]).split(".")[-1])
+                ind = str(row.get("industry") or "")
+                industry_map[c] = ind
+        empty_industry_count = sum(1 for v in industry_map.values() if v == "")
+        logger.info(
+            f"  {len(industry_map)} 只股票有行业信息"
+            + (f"（{empty_industry_count} 只为空，多为退市/历史股票）" if empty_industry_count else "")
+        )
 
-        # Step 2: 股票基本资料（代码、名称、上市日期）
-        logger.info("  拉取股票基本资料...")
+        # Step 2: 股票基本资料（含退市信息，不预过滤 type）
+        logger.info("  拉取股票基本资料（query_stock_basic 全量）...")
         basic_df = self._query(
             bs.query_stock_basic,
-            label="基本资料",
+            label="基本资料(全量)",
         )
         if basic_df.empty:
             return pd.DataFrame(columns=STOCK_INFO_COLS)
 
-        basic_df = basic_df[basic_df["type"] == "1"]  # 1=股票
-        rows = []
+        # 只保留股票类型（含退市），排除指数/可转债等
+        basic_df = basic_df[basic_df["type"].isin(["1"])]
+
+        rows: list[dict] = []
         for _, row in basic_df.iterrows():
             code = normalize_stock_code(str(row["code"]).split(".")[-1])
+            status_val = int(row["status"]) if str(row.get("status") or "").isdigit() else 1
+            out_date = row.get("outDate") or None
+            if out_date == "":
+                out_date = None
             rows.append({
                 "code": code,
-                "name": row.get("code_name", ""),
+                "name": str(row.get("code_name", "")),
                 "industry": industry_map.get(code, ""),
                 "sector": "",
-                "market": "",
+                "market": self._infer_market(code),
                 "list_date": row.get("ipoDate") or None,
                 "total_shares": None,
                 "float_shares": None,
                 "total_cap": None,
                 "float_cap": None,
+                "out_date": out_date,
+                "status": status_val,
+                "industry_source": "csrc",
             })
 
-        logger.info(f"  共 {len(rows)} 只股票")
+        n_delisted = sum(1 for r in rows if r["status"] == 0)
+        logger.info(f"  共 {len(rows)} 只股票（上市: {len(rows) - n_delisted}, 退市: {n_delisted}）")
         return pd.DataFrame(rows, columns=STOCK_INFO_COLS)
+
+    @staticmethod
+    def _infer_market(code: str) -> str:
+        """根据代码前缀推断所属市场板块。"""
+        if code.startswith("688"):
+            return "科创板"
+        if code.startswith("30"):
+            return "创业板"
+        if code.startswith("60"):
+            return "沪市主板"
+        if code.startswith("00"):
+            return "深市主板"
+        if code.startswith(("4", "8")):
+            return "北交所"
+        return "其他"
+
+    # ------------------------------------------------------------------
+    def get_financials(
+        self,
+        codes: list[str],
+        years: list[int] | None = None,
+        quarters: list[int] | None = None,
+    ) -> pd.DataFrame:
+        """批量获取季频财务数据（合并 profit + growth + balance 三类）。
+
+        对每只股票依次查询盈利能力、成长能力、偿债能力三个 API，
+        按 ``statDate`` 合并为单行，输出标准列。
+
+        Parameters
+        ----------
+        codes : list[str]
+            股票代码列表（纯 6 位数字）。
+        years : list[int], optional
+            年份列表。省略时取当前年份。
+        quarters : list[int], optional
+            季度列表 [1,2,3,4]。省略时取所有季度。
+
+        Returns
+        -------
+        DataFrame
+            标准列: code, report_date, pub_date, roe, eps, net_profit, revenue,
+            gp_margin, np_margin, total_shares, float_shares,
+            growth_equity, growth_asset, growth_ni,
+            current_ratio, debt_ratio
+        """
+        import datetime as dt
+
+        if years is None:
+            years = [dt.date.today().year]
+        if quarters is None:
+            quarters = [1, 2, 3, 4]
+
+        all_rows: list[dict] = []
+        total = len(codes)
+
+        for i, code in enumerate(codes, 1):
+            code = normalize_stock_code(code)
+            bs_code = self._bs_code(code)
+
+            for year in years:
+                for quarter in quarters:
+                    # 盈利能力
+                    profit_df = self._query(
+                        bs.query_profit_data,
+                        code=bs_code, year=year, quarter=quarter,
+                        label=f"profit {code}",
+                    )
+
+                    # 成长能力
+                    growth_df = self._query(
+                        bs.query_growth_data,
+                        code=bs_code, year=year, quarter=quarter,
+                        label=f"growth {code}",
+                    )
+
+                    # 偿债能力
+                    balance_df = self._query(
+                        bs.query_balance_data,
+                        code=bs_code, year=year, quarter=quarter,
+                        label=f"balance {code}",
+                    )
+
+                    # 取第一个有效 statDate（三类数据 statDate 一致）
+                    stat_date = None
+                    pub_date = None
+                    for df in (profit_df, growth_df, balance_df):
+                        if not df.empty and "statDate" in df.columns:
+                            sd = str(df["statDate"].iloc[0])
+                            if sd and sd != "":
+                                stat_date = sd
+                                break
+                    for df in (profit_df, growth_df, balance_df):
+                        if not df.empty and "pubDate" in df.columns:
+                            pd_val = str(df["pubDate"].iloc[0])
+                            if pd_val and pd_val != "":
+                                pub_date = pd_val
+                                break
+
+                    if stat_date is None:
+                        continue
+
+                    row: dict = {
+                        "code": code,
+                        "report_date": stat_date,
+                        "pub_date": pub_date,
+                    }
+
+                    # 从 profit 提取
+                    if not profit_df.empty:
+                        row["roe"] = self._safe_float(profit_df, "roeAvg")
+                        row["eps"] = self._safe_float(profit_df, "epsTTM")
+                        row["net_profit"] = self._safe_float(profit_df, "netProfit")
+                        row["revenue"] = self._safe_float(profit_df, "MBRevenue")
+                        row["gp_margin"] = self._safe_float(profit_df, "gpMargin")
+                        row["np_margin"] = self._safe_float(profit_df, "npMargin")
+                        row["total_shares"] = self._safe_float(profit_df, "totalShare")
+                        row["float_shares"] = self._safe_float(profit_df, "liqaShare")
+
+                    # 从 growth 提取
+                    if not growth_df.empty:
+                        row["growth_equity"] = self._safe_float(growth_df, "YOYEquity")
+                        row["growth_asset"] = self._safe_float(growth_df, "YOYAsset")
+                        row["growth_ni"] = self._safe_float(growth_df, "YOYNI")
+
+                    # 从 balance 提取
+                    if not balance_df.empty:
+                        row["current_ratio"] = self._safe_float(balance_df, "currentRatio")
+                        row["debt_ratio"] = self._safe_float(balance_df, "debtAssetRatio")
+
+                    all_rows.append(row)
+
+            if i % 50 == 0 or i == total:
+                logger.info(f"  [{i}/{total}] 财报拉取进度")
+
+        if not all_rows:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(all_rows)
+        for col in ("report_date", "pub_date"):
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col], errors="coerce").dt.date
+        logger.info(f"财报拉取完成: {len(df)} 条记录, {df['code'].nunique()} 只股票")
+        return df
+
+    @staticmethod
+    def _safe_float(df: pd.DataFrame, col: str) -> float | None:
+        """安全提取 DataFrame 中的浮点值，空或异常返回 None。"""
+        if df.empty or col not in df.columns:
+            return None
+        val = df[col].iloc[0]
+        if val is None or val == "" or (isinstance(val, float) and pd.isna(val)):
+            return None
+        try:
+            return float(val)
+        except (ValueError, TypeError):
+            return None
 
     # ------------------------------------------------------------------
     def get_trade_dates(

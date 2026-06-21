@@ -240,7 +240,8 @@ class DataUpdater:
     def update_stock_info(self) -> int:
         """更新全市场股票基本信息（行业/市值等），写入 stock_info 表。
 
-        全量替换：每次更新是当前时刻的快照，退市代码会被清理。
+        全量替换：每次更新是当前时刻的快照。
+        写完后自动调用 :meth:`update_market_cap` 补齐市值字段。
         """
         logger.info("开始更新股票基本信息")
         try:
@@ -258,19 +259,136 @@ class DataUpdater:
 
         if "list_date" in df.columns:
             df["list_date"] = pd.to_datetime(df["list_date"], errors="coerce").dt.date
+        if "out_date" in df.columns:
+            df["out_date"] = pd.to_datetime(df["out_date"], errors="coerce").dt.date
         for col in ("total_shares", "float_shares", "total_cap", "float_cap"):
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
 
         df["updated_at"] = pd.Timestamp.now()
+        rows = 0
         try:
             self.db.truncate("stock_info")
             rows = self.db.insert_or_ignore(df, "stock_info")
             logger.info(f"股票基本信息更新完成: {rows} 只")
-            return rows
         except Exception as e:
             logger.error(f"写入股票基本信息失败: {e}")
             return 0
+
+        # 自动补齐市值（当数据源未提供时）
+        cap_cols = [c for c in ("total_cap", "float_cap") if c in df.columns]
+        if cap_cols and df[cap_cols].isna().all().all():
+            n_cap = self.update_market_cap()
+            logger.info(f"市值补齐完成: {n_cap} 只")
+        return rows
+
+    def update_market_cap(self) -> int:
+        """从日线收盘价 × 股本计算并更新市值字段。
+
+        仅更新 stock_info 表中 total_shares 或 float_shares 不为 NULL 的股票。
+        """
+        if not self.db.table_exists("daily_bars"):
+            logger.warning("daily_bars 表不存在，无法计算市值")
+            return 0
+        if not self.db.table_exists("stock_info"):
+            logger.warning("stock_info 表不存在，无法计算市值")
+            return 0
+
+        logger.info("计算股票市值（close × shares）...")
+        try:
+            # DuckDB UPDATE ... FROM 子查询
+            self.db.execute("""
+                UPDATE stock_info
+                SET
+                    total_cap = s.total_shares * d.close,
+                    float_cap = s.float_shares * d.close
+                FROM (
+                    SELECT code, close
+                    FROM daily_bars
+                    WHERE (code, date) IN (
+                        SELECT code, MAX(date) FROM daily_bars GROUP BY code
+                    )
+                ) d
+                WHERE stock_info.code = d.code
+                  AND stock_info.total_shares IS NOT NULL
+            """)
+
+            result = self.db.query(
+                "SELECT COUNT(*) AS n FROM stock_info WHERE total_cap IS NOT NULL"
+            )
+            n = int(result["n"].iloc[0]) if not result.empty else 0
+            logger.info(f"市值更新完成: {n} 只")
+            return n
+        except Exception as e:
+            logger.error(f"市值计算失败: {e}")
+            return 0
+
+    def update_financials(
+        self,
+        codes: list[str] | None = None,
+        years: list[int] | None = None,
+        quarters: list[int] | None = None,
+    ) -> int:
+        """批量更新季频财务数据。
+
+        Parameters
+        ----------
+        codes : list[str], optional
+            股票代码列表。省略时取全部 A 股。
+        years : list[int], optional
+            年份列表。省略时取当前年份。
+        quarters : list[int], optional
+            季度列表。省略时取全部 4 个季度。
+
+        Returns
+        -------
+        int
+            写入的记录数。
+        """
+        if codes is None:
+            codes = self._get_all_a_codes()
+            if not codes:
+                logger.warning("无法获取股票列表，跳过财报更新")
+                return 0
+
+        # 从 stock_info 过滤掉退市股（退市股无新财报）
+        try:
+            if self.db.table_exists("stock_info"):
+                live = self.db.query(
+                    "SELECT code FROM stock_info WHERE status = 1 OR status IS NULL"
+                )
+                if not live.empty:
+                    live_codes = set(live["code"].astype(str).str.zfill(6))
+                    codes = [c for c in codes if c in live_codes]
+                    logger.info(f"过滤退市股后: {len(codes)} 只")
+        except Exception as e:
+            logger.debug(f"退市过滤跳过: {e}")
+
+        logger.info(f"开始更新财报: {len(codes)} 只股票")
+        df = self._source.get_financials(codes, years=years, quarters=quarters)
+
+        if df.empty:
+            logger.warning("未获取到财报数据")
+            return 0
+
+        # 类型转换
+        for col in ("report_date", "pub_date"):
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col], errors="coerce").dt.date
+        numeric_cols = [
+            "roe", "eps", "net_profit", "revenue", "gp_margin", "np_margin",
+            "total_shares", "float_shares",
+            "growth_equity", "growth_asset", "growth_ni",
+            "current_ratio", "debt_ratio",
+        ]
+        for col in numeric_cols:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        # Upsert（报告期数据可能被修订，覆盖写入）
+        rows = self.db.upsert(df, "financials")
+        logger.info(f"财报更新完成: {rows} 条记录, {df['code'].nunique()} 只股票")
+        return rows
 
     # ------------------------------------------------------------------
     # 内部：代码列表
@@ -406,16 +524,17 @@ def main() -> None:
         epilog="""\
 示例:
   %(prog)s                                # 更新全部 A 股日线 (默认)
-  %(prog)s --mode stock_info              # 更新股票基本信息（行业/市值）
+  %(prog)s --mode stock_info              # 更新股票基本信息（行业/市值/退市标记）
   %(prog)s --mode benchmark               # 更新 Benchmark 指数行情
   %(prog)s --mode index --index-code 000300
   %(prog)s --mode codes --codes 000001 600519
+  %(prog)s --mode financials              # 更新季频财报数据
   %(prog)s --no-star --no-bse             # 排除科创板和北交所
 """,
     )
     parser.add_argument(
         "--mode",
-        choices=("all", "stock_info", "benchmark", "index", "codes"),
+        choices=("all", "stock_info", "benchmark", "index", "codes", "financials"),
         default="all",
         help="更新模式 (默认: all)",
     )
@@ -499,6 +618,10 @@ def main() -> None:
                 end_date=args.end_date,
                 adjust=args.adjust,
             )
+        elif args.mode == "financials":
+            rows = updater.update_financials(codes=args.codes or None)
+            print(f"财报更新完成: {rows} 条记录")
+            return
         else:
             parser.error(f"未知 mode: {args.mode}")
             return

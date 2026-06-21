@@ -110,6 +110,28 @@ class Database:
             )
         """)
 
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS financials (
+                code          VARCHAR NOT NULL,
+                report_date   DATE NOT NULL,
+                pub_date      DATE,
+                roe           DOUBLE,
+                eps           DOUBLE,
+                net_profit    DOUBLE,
+                revenue       DOUBLE,
+                gp_margin     DOUBLE,
+                np_margin     DOUBLE,
+                total_shares  DOUBLE,
+                float_shares  DOUBLE,
+                growth_equity DOUBLE,
+                growth_asset  DOUBLE,
+                growth_ni     DOUBLE,
+                current_ratio DOUBLE,
+                debt_ratio    DOUBLE,
+                PRIMARY KEY (code, report_date)
+            )
+        """)
+
         logger.info("数据库表初始化完成")
 
     def _ensure_stock_info_columns(self) -> None:
@@ -121,6 +143,9 @@ class Database:
             "float_shares": "DOUBLE",
             "total_cap": "DOUBLE",
             "float_cap": "DOUBLE",
+            "out_date": "DATE",
+            "status": "INTEGER",
+            "industry_source": "VARCHAR",
         }
         try:
             existing = {
