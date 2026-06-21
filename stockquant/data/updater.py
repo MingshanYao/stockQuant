@@ -139,9 +139,10 @@ class DataUpdater:
         include_star: bool = True,
         include_bse: bool = True,
         include_gem: bool = True,
+        include_delisted: bool = False,
     ) -> dict[str, int]:
         """更新全部 A 股日线数据。"""
-        codes = self._get_all_a_codes()
+        codes = self._get_all_a_codes(include_delisted=include_delisted)
         codes = filter_codes(
             codes,
             include_star=include_star,
@@ -394,20 +395,52 @@ class DataUpdater:
     # 内部：代码列表
     # ------------------------------------------------------------------
 
-    def _get_all_a_codes(self) -> list[str]:
-        """获取全部 A 股代码（走数据源的 get_stock_list）。"""
+    def _get_all_a_codes(self, include_delisted: bool = False) -> list[str]:
+        """获取全部 A 股代码。
+
+        Parameters
+        ----------
+        include_delisted : bool
+            False: 仅当前上市股票（``get_stock_list``）。
+            True:  含退市股（``get_stock_info``），按历史覆盖范围过滤。
+        """
+        if not include_delisted:
+            try:
+                df = call_with_retries(
+                    self._source.get_stock_list,
+                    label="source.get_stock_list",
+                )
+            except Exception as e:
+                logger.error(f"获取 A 股列表失败: {e}")
+                return []
+            if df.empty:
+                return []
+            codes = df["code"].astype(str).str.zfill(6).tolist()
+            logger.info(f"全部 A 股（仅上市）: {len(codes)} 只")
+            return codes
+
+        # 含退市股：走 get_stock_info，过滤掉退市早于 2010 年的（无日线数据）
         try:
             df = call_with_retries(
-                self._source.get_stock_list,
-                label="source.get_stock_list",
+                self._source.get_stock_info,
+                label="source.get_stock_info",
             )
         except Exception as e:
             logger.error(f"获取 A 股列表失败: {e}")
             return []
         if df.empty:
             return []
+        # 过滤：上市日期在合理范围 + 退市日期不早于 2010 年
+        if "list_date" in df.columns:
+            df = df[df["list_date"].notna()]
+        if "out_date" in df.columns:
+            df = df[df["out_date"].isna() | (df["out_date"] >= pd.Timestamp("2010-01-01").date())]
         codes = df["code"].astype(str).str.zfill(6).tolist()
-        logger.info(f"全部 A 股: {len(codes)} 只")
+        logger.info(
+            f"全部 A 股（含退市, 2010年后活跃）: {len(codes)} 只 "
+            f"（上市: {(df['status'] == 1).sum() if 'status' in df.columns else '?'}, "
+            f"退市: {(df['status'] == 0).sum() if 'status' in df.columns else '?'}）"
+        )
         return codes
 
     # ------------------------------------------------------------------
@@ -572,11 +605,18 @@ def main() -> None:
         action="store_false",
         help="排除创业板",
     )
+    parser.add_argument(
+        "--include-delisted",
+        action="store_true",
+        help="纳入已退市股票（默认仅当前上市）。mode=all 时生效。",
+    )
 
     args = parser.parse_args()
     updater = DataUpdater()
 
     try:
+        include_delisted = getattr(args, "include_delisted", False)
+
         if args.mode == "all":
             res = updater.update_all_daily(
                 start_date=args.start_date,
@@ -585,6 +625,7 @@ def main() -> None:
                 include_star=args.include_star,
                 include_bse=args.include_bse,
                 include_gem=args.include_gem,
+                include_delisted=include_delisted,
             )
         elif args.mode == "stock_info":
             rows = updater.update_stock_info()
