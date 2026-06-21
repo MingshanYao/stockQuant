@@ -120,7 +120,7 @@ class AkShareDataSource(BaseDataSource):
             )
             if raw is None or raw.empty:
                 return pd.DataFrame()
-            return standardize_daily(raw, code)
+            return standardize_daily(raw, code, volume_unit="lots")
 
         raw = ak.stock_zh_a_hist(
             symbol=code, period="daily",
@@ -133,8 +133,12 @@ class AkShareDataSource(BaseDataSource):
         if adj is None or adj.empty:
             return pd.DataFrame()
 
-        df_raw = standardize_daily(raw, code) if (raw is not None and not raw.empty) else pd.DataFrame()
-        df_adj = standardize_daily(adj, code)
+        df_raw = (
+            standardize_daily(raw, code, volume_unit="lots")
+            if (raw is not None and not raw.empty)
+            else pd.DataFrame()
+        )
+        df_adj = standardize_daily(adj, code, volume_unit="lots")
         if df_raw.empty:
             return df_adj
         return self._compute_adjusted_volume(code, df_raw, df_adj)
@@ -169,7 +173,7 @@ class AkShareDataSource(BaseDataSource):
         df = df.copy()
         df["pct_change"] = df["close"].pct_change()
         df["change"] = df["close"].diff()
-        return standardize_daily(df, code)
+        return standardize_daily(df, code, volume_unit="lots")
 
     # ------------------------------------------------------------------
     # 指数日线
@@ -548,8 +552,9 @@ class AkShareDataSource(BaseDataSource):
         if factor_nan.any():
             logger.warning(f"[{code}] adj_factor 为 NaN 共 {int(factor_nan.sum())} 行")
 
-        # ---- 5. 计算复权成交量 ----
+        # ---- 5. 计算复权成交量 & 保存复权因子 ----
         merged["volume"] = merged["volume_raw"] / adj_factor
+        merged["adj_factor"] = adj_factor  # 持久化复权因子
 
         # 检查：最终 volume 异常
         vol = merged["volume"]

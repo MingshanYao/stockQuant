@@ -114,7 +114,7 @@ class TushareDataSource(BaseDataSource):
         df = pd.DataFrame(rows)
         if df.empty:
             return df
-        return standardize_daily(df, normalize_stock_code(code))
+        return standardize_daily(df, normalize_stock_code(code), volume_unit="lots")
 
     # ------------------------------------------------------------------
     def get_index_daily(

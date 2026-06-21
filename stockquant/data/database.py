@@ -56,7 +56,7 @@ class Database:
     # ------------------------------------------------------------------
 
     def init_tables(self) -> None:
-        """初始化核心表结构。"""
+        """初始化核心表结构（含自动迁移旧表）。"""
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS daily_bars (
                 code        VARCHAR NOT NULL,
@@ -65,14 +65,17 @@ class Database:
                 high        DOUBLE,
                 low         DOUBLE,
                 close       DOUBLE,
+                pre_close   DOUBLE,
                 volume      BIGINT,
                 amount      DOUBLE,
+                vwap        DOUBLE,
                 turnover    DOUBLE,
                 pct_change  DOUBLE,
-                change      DOUBLE,
+                adj_factor  DOUBLE,
                 PRIMARY KEY (code, date)
             )
         """)
+        self._migrate_daily_bars()
 
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS stock_info (
@@ -135,6 +138,77 @@ class Database:
                     logger.info(f"stock_info 表追加列: {col} {dtype}")
         except Exception as e:
             logger.warning(f"stock_info 列检查/追加失败: {e}")
+
+    def _migrate_daily_bars(self) -> None:
+        """兼容旧版 daily_bars 表：新增 pre_close / vwap / adj_factor，移除 change。"""
+        expected_new = {
+            "pre_close": "DOUBLE",
+            "vwap": "DOUBLE",
+            "adj_factor": "DOUBLE",
+        }
+        try:
+            existing = {
+                row[0]
+                for row in self.conn.execute(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name = 'daily_bars'"
+                ).fetchall()
+            }
+        except Exception:
+            return  # 表可能尚未创建
+
+        # 追加缺失的新列
+        for col, dtype in expected_new.items():
+            if col not in existing:
+                try:
+                    self.conn.execute(
+                        f"ALTER TABLE daily_bars ADD COLUMN {col} {dtype}"
+                    )
+                    logger.info(f"daily_bars 表追加列: {col} {dtype}")
+                except Exception as e:
+                    logger.warning(f"daily_bars 追加列 {col} 失败: {e}")
+
+        # 回填已存在数据：vwap = amount / volume, adj_factor = 1.0
+        if "vwap" in expected_new and "vwap" in expected_new:
+            try:
+                self.conn.execute("""
+                    UPDATE daily_bars
+                    SET vwap = amount / NULLIF(volume, 0)
+                    WHERE vwap IS NULL AND amount IS NOT NULL AND volume > 0
+                """)
+            except Exception as e:
+                logger.debug(f"vwap 回填跳过: {e}")
+
+        if "adj_factor" in expected_new:
+            try:
+                self.conn.execute("""
+                    UPDATE daily_bars SET adj_factor = 1.0 WHERE adj_factor IS NULL
+                """)
+            except Exception as e:
+                logger.debug(f"adj_factor 回填跳过: {e}")
+
+        if "pre_close" in expected_new:
+            try:
+                # 如果有 pct_change 列，从 close 和 pct_change 反推
+                if "pct_change" in existing:
+                    self.conn.execute("""
+                        UPDATE daily_bars
+                        SET pre_close = close / (1 + pct_change / 100)
+                        WHERE pre_close IS NULL AND pct_change IS NOT NULL
+                    """)
+                # 兜底：用 close.shift(1)（按 date 排序后）
+                self.conn.execute("""
+                    UPDATE daily_bars
+                    SET pre_close = (
+                        SELECT b.close FROM daily_bars b
+                        WHERE b.code = daily_bars.code
+                          AND b.date < daily_bars.date
+                        ORDER BY b.date DESC LIMIT 1
+                    )
+                    WHERE pre_close IS NULL
+                """)
+            except Exception as e:
+                logger.debug(f"pre_close 回填跳过: {e}")
 
     # ------------------------------------------------------------------
     # 写入：三种明确语义

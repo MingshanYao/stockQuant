@@ -158,6 +158,7 @@ class Alpha191Indicators(BaseIndicator):
             close=_pivot("close"),
             volume=_pivot("volume"),
             amount=_pivot("amount"),
+            vwap=_pivot("vwap"),
             benchmark_close=bm_close,
             benchmark_open=bm_open,
         )
@@ -216,8 +217,10 @@ class Alpha191Engine:
         if vwap is not None:
             self.vwap = vwap
         elif amount is not None:
-            self.vwap = amount / (volume * 100 + 1e-10)
+            # volume 已归一化为股，VWAP = amount / shares_traded（恒等式，非近似）
+            self.vwap = amount / (volume + 1e-10)
         else:
+            # 无 amount 时的 fallback：典型价格（约 1-3% 误差）
             self.vwap = (high + low + close) / 3
 
         self.returns = returns if returns is not None else close.pct_change()

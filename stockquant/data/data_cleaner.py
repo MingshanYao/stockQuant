@@ -93,8 +93,13 @@ class DataCleaner:
             "high": "float64",
             "low": "float64",
             "close": "float64",
-            "volume": "int64",
+            "pre_close": "float64",
+            "volume": "float64",       # float 以容纳 NaN / 大值
             "amount": "float64",
+            "vwap": "float64",
+            "turnover": "float64",
+            "pct_change": "float64",
+            "adj_factor": "float64",
         }
         df = df.copy()
 
@@ -219,6 +224,72 @@ class DataCleaner:
     # 管道处理
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def validate_price_consistency(df: pd.DataFrame) -> pd.DataFrame:
+        """校验价格一致性，标记异常行。
+
+        - pre_close 应接近前一日的 close（允许 ±1% 日内跳空除外）
+        - vwap 应在 [low, high] 区间内（容差 1%）
+        - open/high/low/close 均 > 0
+
+        仅做 warning 记录，不删除数据。
+        """
+        if df.empty:
+            return df
+
+        df = df.copy()
+        n = len(df)
+
+        # 价格正值检查
+        for col in ("open", "high", "low", "close"):
+            if col in df.columns:
+                bad = df[col].le(0)
+                if bad.any():
+                    logger.warning(f"价格异常: {col} <= 0 共 {int(bad.sum())} 行")
+
+        # VWAP 区间检查
+        if all(c in df.columns for c in ("vwap", "low", "high")):
+            vwap_below_low = df["vwap"] < df["low"] * 0.99
+            vwap_above_high = df["vwap"] > df["high"] * 1.01
+            n_bad = int((vwap_below_low | vwap_above_high).sum())
+            if n_bad > 0:
+                logger.warning(
+                    f"VWAP 区间异常: {n_bad}/{n} 行 VWAP 超出 [low, high] 容差范围"
+                )
+
+        # pre_close 连续性检查（首日跳过）
+        if "pre_close" in df.columns and "close" in df.columns:
+            shifted_close = df["close"].shift(1)
+            gap = (df["pre_close"] - shifted_close).abs()
+            # 只对非首行做检查
+            bad = gap > shifted_close * 0.02  # 2% 以上差异
+            if bad.iloc[1:].any():
+                n_bad = int(bad.sum())
+                logger.warning(
+                    f"pre_close 不连续: {n_bad} 行与前日 close 差异 > 2%"
+                )
+
+        return df
+
+    @staticmethod
+    def compute_missing_vwap(df: pd.DataFrame) -> pd.DataFrame:
+        """若 vwap 列缺失或全 NaN，从 amount/volume 推导。"""
+        if df.empty:
+            return df
+
+        df = df.copy()
+        needs_vwap = (
+            "vwap" not in df.columns
+            or df["vwap"].isna().all()
+        )
+        if needs_vwap and "amount" in df.columns and "volume" in df.columns:
+            df["vwap"] = df["amount"] / (df["volume"].replace(0, pd.NA) + 1e-10)
+        return df
+
+    # ------------------------------------------------------------------
+    # 管道处理
+    # ------------------------------------------------------------------
+
     @classmethod
     def clean_pipeline(
         cls,
@@ -229,6 +300,8 @@ class DataCleaner:
         """执行标准清洗管道。"""
         df = cls.drop_invalid_stocks(df)   # 先剔除异常股票，再做后续处理
         df = cls.standardize_columns(df)
+        df = cls.compute_missing_vwap(df)   # 补全 VWAP
+        df = cls.validate_price_consistency(df)  # 价格一致性校验
         df = cls.fill_missing(df, method=fill_method)
         if remove_suspended:
             df = cls.remove_suspended(df)

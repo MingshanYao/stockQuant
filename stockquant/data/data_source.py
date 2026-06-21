@@ -26,8 +26,8 @@ if TYPE_CHECKING:
 # ======================================================================
 
 DAILY_BAR_COLS: tuple[str, ...] = (
-    "code", "date", "open", "high", "low", "close",
-    "volume", "amount", "turnover", "pct_change", "change",
+    "code", "date", "open", "high", "low", "close", "pre_close",
+    "volume", "amount", "vwap", "turnover", "pct_change", "adj_factor",
 )
 
 INDEX_DAILY_COLS: tuple[str, ...] = (
@@ -41,25 +41,46 @@ _CN_DAILY_RENAME = {
     "最高": "high",
     "最低": "low",
     "收盘": "close",
+    "昨收": "pre_close",
+    "前收盘": "pre_close",
     "成交量": "volume",
     "成交额": "amount",
     "换手率": "turnover",
     "涨跌幅": "pct_change",
-    "涨跌额": "change",
+    "涨跌额": "change",       # only used to derive pre_close if missing
 }
 
 # BaoStock 等英文返回值的映射（仅列出非标准的）
 _EN_DAILY_RENAME = {
+    "preclose": "pre_close",
     "turn": "turnover",
     "pctChg": "pct_change",
 }
 
 
-def standardize_daily(df: pd.DataFrame, code: str) -> pd.DataFrame:
+def standardize_daily(
+    df: pd.DataFrame,
+    code: str,
+    *,
+    volume_unit: str = "shares",
+    adj_factor: pd.Series | None = None,
+) -> pd.DataFrame:
     """统一日线 DataFrame schema，输出列与 daily_bars 表对齐。
 
     支持输入为中文列名（AkShare）或英文列名（BaoStock / 新浪）。
-    多余列被丢弃，缺失列保留为空。
+
+    Parameters
+    ----------
+    df : DataFrame
+        原始日线数据。
+    code : str
+        股票代码（纯 6 位数字）。
+    volume_unit : str
+        原始成交量单位: ``"shares"`` (股) 或 ``"lots"`` (手，100股/手)。
+        输出统一为 shares (股)。
+    adj_factor : Series, optional
+        复权因子序列（与 df 行对齐）。传入时直接使用，未传入时尝试从
+        ``close / close_raw`` 推导（需同时存在两列）。
     """
     if df is None or df.empty:
         return pd.DataFrame()
@@ -68,6 +89,43 @@ def standardize_daily(df: pd.DataFrame, code: str) -> pd.DataFrame:
     df["code"] = code
     if "date" in df.columns:
         df["date"] = pd.to_datetime(df["date"])
+
+    # ---- 1. volume 单位归一化: 手 → 股 ----
+    if "volume" in df.columns:
+        df["volume"] = pd.to_numeric(df["volume"], errors="coerce")
+        if volume_unit == "lots":
+            df["volume"] = df["volume"] * 100
+
+    # ---- 2. pre_close 推导 ----
+    if "pre_close" not in df.columns or df["pre_close"].isna().all():
+        # 从 pct_change 反推
+        if "pct_change" in df.columns and "close" in df.columns:
+            df["pre_close"] = df["close"] / (1 + df["pct_change"] / 100)
+        # 从 change 反推
+        elif "change" in df.columns and "close" in df.columns:
+            df["pre_close"] = df["close"] - df["change"]
+        # 从 close 前移
+        elif "close" in df.columns:
+            df["pre_close"] = df["close"].shift(1)
+
+    # ---- 3. adj_factor 处理 ----
+    if adj_factor is not None:
+        df["adj_factor"] = adj_factor
+    elif "adj_factor" not in df.columns or df["adj_factor"].isna().all():
+        # 从 close_raw（列名映射后仍然存在的话）和 close 推导
+        if "close_raw" in df.columns:
+            raw = pd.to_numeric(df["close_raw"], errors="coerce")
+            cls = pd.to_numeric(df["close"], errors="coerce")
+            with pd.option_context("mode.use_inf_as_na", True):
+                df["adj_factor"] = cls / raw
+        else:
+            df["adj_factor"] = 1.0
+
+    # ---- 4. vwap 计算 ----
+    if "vwap" not in df.columns or df["vwap"].isna().all():
+        if "amount" in df.columns and "volume" in df.columns:
+            df["vwap"] = df["amount"] / (df["volume"].replace(0, pd.NA) + 1e-10)
+
     return df.reindex(columns=list(DAILY_BAR_COLS))
 
 

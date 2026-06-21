@@ -218,7 +218,7 @@ class BaoStockDataSource(BaseDataSource):
         if "isST" in df.columns:
             df["isST"] = pd.to_numeric(df["isST"], errors="coerce").fillna(0).astype(int)
 
-        return standardize_daily(df, normalize_stock_code(code))
+        return standardize_daily(df, normalize_stock_code(code), volume_unit="shares")
 
     # ------------------------------------------------------------------
     def get_minute_bars(
