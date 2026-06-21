@@ -8,7 +8,7 @@ BaoStock 提供 22 个 API 覆盖以下领域：
 - 交易日历 + 全量证券元信息
 - 宏观经济（存贷款利率/准备金率/货币供应量）
 
-频率限制：每天不超过 50,000 次 → RateLimiter(0.57/s, burst=100)
+频率限制：每天不超过 50,000 次（由调用方控制），接口速率 16 req/s
 """
 
 from __future__ import annotations
@@ -87,8 +87,8 @@ class BaoStockDataSource(BaseDataSource):
 
     def __init__(self) -> None:
         self._logged_in = False
-        # Baostock 每天不超过 50,000 次 → 0.57 req/s, burst=100
-        self._rate_limiter = RateLimiter(rate=0.57, burst=100)
+        # Baostock 每天不超过 50,000 次（调用方自行控制每日总量）
+        self._rate_limiter = RateLimiter(rate=16, burst=200)
 
     # ------------------------------------------------------------------
     # 内部工具
