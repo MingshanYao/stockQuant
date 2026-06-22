@@ -462,6 +462,9 @@ class StockUniverse:
         # --- 解析基准 ---
         benchmark_code = self._resolve_benchmark(benchmark)
 
+        # --- 预过滤：利用 stock_info 排除区间外的股票 ---
+        final_codes = self._filter_by_list_date(final_codes, start_date, end_date)
+
         # --- 加载个股日线 ---
         stock_data: dict[str, pd.DataFrame] = {}
         missing: list[str] = []
@@ -513,6 +516,46 @@ class StockUniverse:
         if pool.is_board:
             return self._get_codes_by_prefix(pool.code_prefixes)
         return []
+
+    def _filter_by_list_date(
+        self, codes: list[str], start: str, end: str
+    ) -> list[str]:
+        """排除在请求区间内不可能有数据的股票。
+
+        利用 stock_info 的 list_date / out_date 进行过滤：
+        - 上市日在 end 之后 → 跳过（未上市）
+        - 退市日在 start 之前 → 跳过（已退市）
+        """
+        try:
+            df = self._dm.get_stock_info(codes)
+            if df.empty or "list_date" not in df.columns:
+                return codes
+
+            end_dt = pd.Timestamp(end)
+            start_dt = pd.Timestamp(start)
+            valid: set[str] = set()
+
+            for _, row in df.iterrows():
+                code = str(row["code"]).zfill(6)
+                ld = row.get("list_date")
+                if pd.notna(ld) and pd.Timestamp(ld) > end_dt:
+                    continue
+                od = row.get("out_date")
+                if pd.notna(od) and pd.Timestamp(od) < start_dt:
+                    continue
+                valid.add(code)
+
+            before = len(codes)
+            filtered = [c for c in codes if c in valid]
+            skipped = before - len(filtered)
+            if skipped:
+                logger.info(
+                    f"上市日期预过滤: {before} → {len(filtered)}"
+                    f"（跳过 {skipped} 只区间外股票）"
+                )
+            return filtered
+        except Exception:
+            return codes
 
     def _apply_pool_exclude(self, codes: list[str], pool: Pool) -> list[str]:
         """从代码列表中排除 Pool 对应的股票。"""

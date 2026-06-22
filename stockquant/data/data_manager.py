@@ -119,10 +119,10 @@ class DataManager:
         end_date: str | dt.date | None = None,
         adjust: str | None = None,
     ) -> pd.DataFrame:
-        """获取日线数据：本地优先，缺失增量远程拉取并写回。
+        """获取日线数据（仅本地 DB，不触发远程下载）。
 
+        如需更新数据，请先运行 DataUpdater 同步到本地。
         返回数据已按 ``adjust`` 参数应用复权（默认从配置读取）。
-        DB 中始终存储不复权价格 + adj_factor。
         """
         code = normalize_stock_code(code)
         start_date = ensure_date(start_date or self.cfg.get("data_fetch.start_date", "2020-01-01"))
@@ -130,21 +130,18 @@ class DataManager:
         adjust = adjust or self.cfg.get("data_fetch.adjust", "hfq")
 
         local_df = self._load_local_daily(code, start_date, end_date)
-        if not local_df.empty:
-            latest = local_df["date"].max()
-            latest_date = latest.date() if hasattr(latest, "date") else latest
-            if latest_date >= end_date:
-                return apply_price_adjustment(local_df, method=adjust)
+        if local_df.empty:
+            return pd.DataFrame()
 
-            next_day = latest_date + dt.timedelta(days=1)
-            new_df = self._fetch_and_persist_daily(code, next_day, end_date, adjust)
-            if not new_df.empty:
-                merged = pd.concat([local_df, new_df], ignore_index=True)
-                return apply_price_adjustment(merged, method=adjust)
-            return apply_price_adjustment(local_df, method=adjust)
+        latest = local_df["date"].max()
+        latest_date = latest.date() if hasattr(latest, "date") else latest
+        if latest_date < end_date:
+            logger.debug(
+                f"{code}: 本地数据截止 {latest_date}，"
+                f"早于请求 {end_date}。运行 DataUpdater 获取增量。"
+            )
 
-        df = self._fetch_and_persist_daily(code, start_date, end_date, adjust)
-        return apply_price_adjustment(df, method=adjust)
+        return apply_price_adjustment(local_df, method=adjust)
 
     def batch_fetch_daily(
         self,
@@ -179,14 +176,25 @@ class DataManager:
         start_date: str | dt.date | None = None,
         end_date: str | dt.date | None = None,
     ) -> pd.DataFrame:
+        """获取指数日线（仅本地 DB，不触发远程下载）。
+
+        如需更新数据，请先运行 DataUpdater 同步到本地。
+        """
         code = normalize_stock_code(code)
         start_date = ensure_date(start_date or self.cfg.get("data_fetch.start_date"))
         end_date = ensure_date(end_date) or dt.date.today()
 
-        df = self._source.get_index_daily(code, start_date, end_date)
-        if not df.empty and self.db.table_exists("index_daily"):
-            self.db.insert_or_ignore(df, "index_daily")
-        return df
+        try:
+            if self.db.table_exists("index_daily"):
+                df = self.db.query(
+                    "SELECT * FROM index_daily WHERE code = ? AND date >= ? AND date <= ? ORDER BY date",
+                    [code, str(start_date), str(end_date)],
+                )
+                if not df.empty:
+                    return df
+        except Exception:
+            pass
+        return pd.DataFrame()
 
     # ------------------------------------------------------------------
     # 交易日历
