@@ -129,6 +129,51 @@ def standardize_daily(
     return df.reindex(columns=list(DAILY_BAR_COLS))
 
 
+# 需要复权调整的价格列
+_PRICE_COLS = ["open", "high", "low", "close", "pre_close", "vwap"]
+
+
+def apply_price_adjustment(
+    df: pd.DataFrame, method: str = "hfq",
+) -> pd.DataFrame:
+    """对日线 DataFrame 就地应用复权价格调整。
+
+    Parameters
+    ----------
+    df : DataFrame
+        含原始价格列和 ``adj_factor`` 列的日线数据。
+    method : str
+        ``"hfq"`` — 后复权：price × adj_factor。
+        ``"qfq"`` — 前复权：price × adj_factor / adj_factor.max()。
+        ``"none"`` — 不复权，原样返回。
+
+    Returns
+    -------
+    DataFrame
+        调整后的 DataFrame（就地修改）。
+    """
+    if method == "none" or "adj_factor" not in df.columns:
+        return df
+
+    factor = df["adj_factor"].copy()
+
+    if method == "hfq":
+        pass  # factor as-is
+    elif method == "qfq":
+        # 前复权 = 后复权价格 / 最近一期后复权因子
+        latest = factor.max()
+        if latest > 0:
+            factor = factor / latest
+    else:
+        return df
+
+    for col in _PRICE_COLS:
+        if col in df.columns:
+            df[col] = df[col] * factor
+
+    return df
+
+
 def standardize_index(df: pd.DataFrame, code: str) -> pd.DataFrame:
     """统一指数日线 DataFrame schema，输出列与 index_daily 表对齐。
 

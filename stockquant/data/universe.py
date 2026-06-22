@@ -41,6 +41,7 @@ from typing import TYPE_CHECKING, Optional, Sequence
 
 import pandas as pd
 
+from stockquant.utils.config import Config
 from stockquant.utils.helpers import normalize_stock_code
 from stockquant.utils.logger import get_logger
 
@@ -417,6 +418,7 @@ class StockUniverse:
         start_date: str,
         end_date: str,
         benchmark: Pool | str = Pool.CSI300,
+        adjust: str | None = None,
     ) -> BacktestDataset:
         """从本地数据库加载日线数据，构建回测数据集。
 
@@ -427,14 +429,22 @@ class StockUniverse:
         end_date : str
             截止日期，如 ``"2025-12-31"``。
         benchmark : Pool | str
-            基准指数。传入 ``Pool`` 枚举（需为指数类型）或指数代码字符串，
-            默认 ``Pool.CSI300``。
+            基准指数。
+        adjust : str, optional
+            复权方式：``"hfq"`` / ``"qfq"`` / ``"none"``。
+            默认读取 ``data_fetch.adjust`` 配置（hfq）。
 
         Returns
         -------
         BacktestDataset
         """
         final_codes = self.codes()
+
+        # 默认从配置读取复权方式
+        if adjust is None:
+            cfg = Config()
+            adjust = cfg.get("data_fetch.adjust", "hfq")
+        logger.info(f"复权方式: {adjust}")
 
         scope_label = " ∪ ".join(self._scope_labels) if self._scope_labels else "未定义"
         exclude_parts = (
@@ -465,6 +475,7 @@ class StockUniverse:
             else:
                 df = df.copy()
                 df["date"] = pd.to_datetime(df["date"])
+                # 复权已在 DataManager.fetch_daily() 中自动应用
                 stock_data[code] = df
                 date_min = df["date"].min().date()
                 date_max = df["date"].max().date()

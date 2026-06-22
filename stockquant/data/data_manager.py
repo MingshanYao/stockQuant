@@ -16,7 +16,9 @@ from typing import Sequence
 
 import pandas as pd
 
-from stockquant.data.data_source import BaseDataSource, DataSourceFactory
+from stockquant.data.data_source import (
+    BaseDataSource, DataSourceFactory, apply_price_adjustment,
+)
 from stockquant.data.data_cleaner import DataCleaner
 from stockquant.data.database import Database
 from stockquant.utils.config import Config
@@ -117,7 +119,11 @@ class DataManager:
         end_date: str | dt.date | None = None,
         adjust: str | None = None,
     ) -> pd.DataFrame:
-        """获取日线数据：本地优先，缺失增量远程拉取并写回。"""
+        """获取日线数据：本地优先，缺失增量远程拉取并写回。
+
+        返回数据已按 ``adjust`` 参数应用复权（默认从配置读取）。
+        DB 中始终存储不复权价格 + adj_factor。
+        """
         code = normalize_stock_code(code)
         start_date = ensure_date(start_date or self.cfg.get("data_fetch.start_date", "2020-01-01"))
         end_date = ensure_date(end_date) or dt.date.today()
@@ -128,15 +134,17 @@ class DataManager:
             latest = local_df["date"].max()
             latest_date = latest.date() if hasattr(latest, "date") else latest
             if latest_date >= end_date:
-                return local_df
+                return apply_price_adjustment(local_df, method=adjust)
 
             next_day = latest_date + dt.timedelta(days=1)
             new_df = self._fetch_and_persist_daily(code, next_day, end_date, adjust)
             if not new_df.empty:
-                return pd.concat([local_df, new_df], ignore_index=True)
-            return local_df
+                merged = pd.concat([local_df, new_df], ignore_index=True)
+                return apply_price_adjustment(merged, method=adjust)
+            return apply_price_adjustment(local_df, method=adjust)
 
-        return self._fetch_and_persist_daily(code, start_date, end_date, adjust)
+        df = self._fetch_and_persist_daily(code, start_date, end_date, adjust)
+        return apply_price_adjustment(df, method=adjust)
 
     def batch_fetch_daily(
         self,

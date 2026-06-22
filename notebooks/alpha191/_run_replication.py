@@ -66,53 +66,13 @@ print("\n" + "=" * 70)
 print("第1章: 加载全A股数据 (2010-2016)")
 print("=" * 70)
 
-from stockquant.data.database import Database
-from stockquant.data.universe import BacktestDataset
+from stockquant.data.universe import Pool, StockUniverse, BacktestDataset
 
-db = Database()
-
-print("从本地数据库批量加载日线数据...")
-all_bars = db.query(
-    "SELECT * FROM daily_bars "
-    "WHERE date >= ? AND date <= ? "
-    "ORDER BY code, date",
-    [START_DATE, END_DATE],
-)
-all_bars["date"] = pd.to_datetime(all_bars["date"])
-
-all_codes = all_bars["code"].unique().tolist()
-all_codes = [c for c in all_codes if not c.startswith(("688", "43", "83", "87"))]
-print(f"本地有 2010-2016 数据的股票: {len(all_codes)} 只")
-
-stock_data = {}
-for code in all_codes:
-    stock_data[code] = all_bars[all_bars["code"] == code].reset_index(drop=True)
-
-del all_bars
-print(f"✅ 加载完成: {len(stock_data)} 只股票")
-
-benchmark_df = db.query(
-    "SELECT * FROM index_daily WHERE code = '000300' AND date >= ? AND date <= ? ORDER BY date",
-    [START_DATE, END_DATE],
-)
-if benchmark_df.empty:
-    benchmark_df = db.query(
-        "SELECT * FROM index_daily WHERE code = '000905' AND date >= ? AND date <= ? ORDER BY date",
-        [START_DATE, END_DATE],
-    )
-    benchmark_code = "000905"
-    print(f"⚠️ 沪深300指数数据缺失，使用中证500作为基准")
-else:
-    benchmark_code = "000300"
-benchmark_df["date"] = pd.to_datetime(benchmark_df["date"])
-
-dataset = BacktestDataset(
-    stock_data=stock_data,
-    codes=list(stock_data.keys()),
-    benchmark=benchmark_df,
-    benchmark_code=benchmark_code,
-    start_date=START_DATE,
-    end_date=END_DATE,
+dataset = (
+    StockUniverse()
+    .scope(Pool.ALL_A)
+    .exclude(Pool.STAR, Pool.BSE)
+    .load(START_DATE, END_DATE, benchmark="000300")
 )
 
 print(dataset.summary())
@@ -155,8 +115,10 @@ print("\n" + "=" * 70)
 print("第3章: IC / ICIR 分析")
 print("=" * 70)
 
-# ── 加载行业 & 市值数据（来自 stock_info 表）──
-stock_info_df = db.query("SELECT code, industry, float_cap FROM stock_info")
+# ── 加载行业 & 市值数据（来自 DataManager）──
+from stockquant.data.data_manager import DataManager
+dm = DataManager()
+stock_info_df = dm.get_stock_info()
 if not stock_info_df.empty:
     industry_map = stock_info_df.set_index("code")["industry"]
     market_cap = stock_info_df.set_index("code")["float_cap"]
@@ -167,11 +129,7 @@ else:
     print("  ⚠️ stock_info 为空，行业/市值因子将不可用")
 
 # ── 加载基准收益（用于 Beta 计算）──
-benchmark_bars_eval = db.query(
-    "SELECT date, close FROM index_daily WHERE code = '000905'"
-    " AND date >= ? AND date <= ? ORDER BY date",
-    [START_DATE, END_DATE],
-)
+benchmark_bars_eval = dm.fetch_index_daily("000905", start_date=START_DATE, end_date=END_DATE)
 benchmark_bars_eval["date"] = pd.to_datetime(benchmark_bars_eval["date"])
 benchmark_returns = benchmark_bars_eval.set_index("date")["close"].pct_change()
 print(f"  基准收益: {len(benchmark_returns.dropna())} 个交易日")

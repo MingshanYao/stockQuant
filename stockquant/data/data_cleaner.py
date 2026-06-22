@@ -87,28 +87,18 @@ class DataCleaner:
     @staticmethod
     def standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
         """确保 DataFrame 包含标准列名与数据类型。"""
-        standard_cols = {
-            "date": "datetime64[ns]",
-            "open": "float64",
-            "high": "float64",
-            "low": "float64",
-            "close": "float64",
-            "pre_close": "float64",
-            "volume": "float64",       # float 以容纳 NaN / 大值
-            "amount": "float64",
-            "vwap": "float64",
-            "turnover": "float64",
-            "pct_change": "float64",
-            "adj_factor": "float64",
-        }
+        numeric_cols = [
+            "open", "high", "low", "close", "pre_close",
+            "volume", "amount", "vwap", "turnover", "pct_change", "adj_factor",
+        ]
         df = df.copy()
 
-        for col, dtype in standard_cols.items():
+        if "date" in df.columns:
+            df["date"] = pd.to_datetime(df["date"], errors="coerce")
+
+        for col in numeric_cols:
             if col in df.columns:
-                try:
-                    df[col] = df[col].astype(dtype)
-                except (ValueError, TypeError):
-                    logger.warning(f"列 {col} 类型转换失败")
+                df[col] = pd.to_numeric(df[col], errors="coerce")
 
         return df
 

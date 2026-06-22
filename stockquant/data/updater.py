@@ -303,12 +303,12 @@ class DataUpdater:
 
         logger.info("计算股票市值（close × shares）...")
         try:
-            # DuckDB UPDATE ... FROM 子查询
+            # DuckDB UPDATE ... FROM 子查询（目标表列不加别名前缀）
             self.db.execute("""
                 UPDATE stock_info
                 SET
-                    total_cap = s.total_shares * d.close,
-                    float_cap = s.float_shares * d.close
+                    total_cap = stock_info.total_shares * d.close,
+                    float_cap = stock_info.float_shares * d.close
                 FROM (
                     SELECT code, close
                     FROM daily_bars
@@ -438,9 +438,12 @@ class DataUpdater:
             return []
         # 过滤：上市日期在合理范围 + 退市日期不早于 2010 年
         if "list_date" in df.columns:
+            df["list_date"] = pd.to_datetime(df["list_date"], errors="coerce")
             df = df[df["list_date"].notna()]
         if "out_date" in df.columns:
-            df = df[df["out_date"].isna() | (df["out_date"] >= pd.Timestamp("2010-01-01").date())]
+            df["out_date"] = pd.to_datetime(df["out_date"], errors="coerce")
+            cutoff = pd.Timestamp("2010-01-01")
+            df = df[df["out_date"].isna() | (df["out_date"] >= cutoff)]
         codes = df["code"].astype(str).str.zfill(6).tolist()
         logger.info(
             f"全部 A 股（含退市, 2010年后活跃）: {len(codes)} 只 "

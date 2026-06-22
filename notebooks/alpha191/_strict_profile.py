@@ -26,8 +26,9 @@ import numpy as np
 
 wall_clock("import 完成")
 
-from stockquant.data.database import Database
-from stockquant.data.universe import BacktestDataset
+from stockquant.data.data_manager import DataManager
+
+dm = DataManager()
 wall_clock("stockquant.data 导入完成")
 
 from stockquant.indicators.alpha191 import Alpha191Indicators, SKIP_ALPHAS
@@ -47,34 +48,25 @@ TOP_N_MULTI = 10
 # Phase 0: 数据加载
 # ═══════════════════════════════════════════════════════════════
 t0 = time.monotonic()
-db = Database()
-t1 = time.monotonic()
-print(f"\n  数据库连接: {t1 - t0:.2f}s")
 
-bars = db.query(
-    "SELECT * FROM daily_bars WHERE date >= ? AND date <= ? ORDER BY code, date",
-    [START_DATE, END_DATE],
-)
-bars["date"] = pd.to_datetime(bars["date"])
-t2 = time.monotonic()
-print(f"  数据查询: {t2 - t1:.2f}s, {len(bars)} rows")
+from stockquant.data.universe import Pool, StockUniverse
 
-codes = bars["code"].unique().tolist()
-codes = [c for c in codes if not c.startswith(("688", "43", "83", "87"))][:N_STOCKS]
+universe = StockUniverse().scope(Pool.ALL_A).exclude(Pool.STAR, Pool.BSE)
+
+# 获取代码列表 → 限制 N 只
+all_codes = universe.codes()
+codes = all_codes[:N_STOCKS]
 
 stock_data = {}
 for code in codes:
-    df = bars[bars["code"] == code].reset_index(drop=True)
-    if len(df) >= 60:
+    df = dm.fetch_daily(code, start_date=START_DATE, end_date=END_DATE)
+    if not df.empty and len(df) >= 60:
         stock_data[code] = df
-del bars
 codes = list(stock_data.keys())
 
-benchmark_df = db.query(
-    "SELECT * FROM index_daily WHERE code = '000905' AND date >= ? AND date <= ? ORDER BY date",
-    [START_DATE, END_DATE],
-)
-benchmark_df["date"] = pd.to_datetime(benchmark_df["date"])
+# 基准指数
+from stockquant.data.universe import BacktestDataset
+benchmark_df = dm.fetch_index_daily("000905", start_date=START_DATE, end_date=END_DATE)
 
 dataset = BacktestDataset(
     stock_data=stock_data, codes=codes, benchmark=benchmark_df,
@@ -108,7 +100,7 @@ wall_clock(f"Phase 1 完成: 因子计算 {time.monotonic() - t0:.2f}s")
 # ═══════════════════════════════════════════════════════════════
 t0 = time.monotonic()
 # ── 加载行业 & 市值 & 基准收益 ──
-stock_info_df = db.query("SELECT code, industry, float_cap FROM stock_info")
+stock_info_df = dm.get_stock_info()
 if not stock_info_df.empty:
     industry_map = stock_info_df.set_index("code")["industry"]
     market_cap = stock_info_df.set_index("code")["float_cap"]
@@ -116,11 +108,7 @@ else:
     industry_map = None
     market_cap = None
 
-benchmark_bars_eval = db.query(
-    "SELECT date, close FROM index_daily WHERE code = '000905'"
-    " AND date >= ? AND date <= ? ORDER BY date",
-    [START_DATE, END_DATE],
-)
+benchmark_bars_eval = dm.fetch_index_daily("000905", start_date=START_DATE, end_date=END_DATE)
 benchmark_bars_eval["date"] = pd.to_datetime(benchmark_bars_eval["date"])
 benchmark_returns = benchmark_bars_eval.set_index("date")["close"].pct_change()
 

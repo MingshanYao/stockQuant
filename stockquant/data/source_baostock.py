@@ -188,21 +188,29 @@ class BaoStockDataSource(BaseDataSource):
         end_date: str | dt.date,
         adjust: str = "hfq",
     ) -> pd.DataFrame:
-        """获取日线行情（含估值指标 peTTM/pbMRQ/psTTM/pcfNcfTTM/isST/tradestatus）。
+        """获取日线行情（不复权价格 + 后复权因子）。
 
-        extra 列保留在返回 DataFrame 中，不丢弃。
+        存储策略：OHLC 为不复权价格（adjustflag='3'），
+        adj_factor 为后复权因子（backAdjustFactor），
+        复权价格 = 不复权价格 × adj_factor。
+
+        Parameters
+        ----------
+        adjust : str
+            保留参数兼容性，实际存储始终不复权。
         """
         bs_code = self._bs_code(code)
         sd = str(ensure_date(start_date))
         ed = str(ensure_date(end_date))
 
+        # 不复权日线（adjustflag='3'）
         df = self._query(
             bs.query_history_k_data_plus,
             bs_code,
             _FULL_DAILY_FIELDS,
             start_date=sd, end_date=ed,
             frequency="d",
-            adjustflag=_ADJUST_MAP.get(adjust, "1"),
+            adjustflag="3",
             label=f"日线 {code}",
         )
 
@@ -218,6 +226,31 @@ class BaoStockDataSource(BaseDataSource):
         # isST → int
         if "isST" in df.columns:
             df["isST"] = pd.to_numeric(df["isST"], errors="coerce").fillna(0).astype(int)
+
+        # 拉取后复权因子（从 1990 年起，确保覆盖所有历史除权事件）
+        adj_df = self.get_adjust_factor(code, start_date="1990-01-01", end_date=ed)
+        if not adj_df.empty and "backAdjustFactor" in adj_df.columns:
+            adj_df["dividOperateDate"] = pd.to_datetime(adj_df["dividOperateDate"])
+            adj_df["backAdjustFactor"] = pd.to_numeric(
+                adj_df["backAdjustFactor"], errors="coerce"
+            )
+            adj_df = adj_df.sort_values("dividOperateDate")
+
+            df["date"] = pd.to_datetime(df["date"])
+            df = df.sort_values("date")
+            # merge_asof: 每个交易日匹配最近的历史除权因子
+            df = pd.merge_asof(
+                df,
+                adj_df[["dividOperateDate", "backAdjustFactor"]],
+                left_on="date",
+                right_on="dividOperateDate",
+                direction="backward",
+            )
+            df = df.drop(columns=["dividOperateDate"])
+            df["adj_factor"] = df["backAdjustFactor"].fillna(1.0)
+            df = df.drop(columns=["backAdjustFactor"])
+        else:
+            df["adj_factor"] = 1.0
 
         return standardize_daily(df, normalize_stock_code(code), volume_unit="shares")
 
