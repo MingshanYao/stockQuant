@@ -333,8 +333,10 @@ class TickFlowDataSource(BaseDataSource):
         start_date: str | dt.date,
         end_date: str | dt.date,
     ) -> pd.DataFrame:
-        """获取指数日线。常用指数通过 .SH/.SZ 后缀查询。"""
-        tf_sym = _to_tf_symbol(code)
+        """获取指数日线。000xxx→.SH (上交所), 399xxx→.SZ (深交所)。"""
+        code = normalize_stock_code(code)
+        suffix = "SZ" if code.startswith("399") else "SH"
+        tf_sym = f"{code}.{suffix}"
         sd = ensure_date(start_date)
         ed = ensure_date(end_date)
 
