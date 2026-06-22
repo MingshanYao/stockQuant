@@ -58,25 +58,50 @@ def _date_to_ms(d: dt.date) -> int:
 
 
 class TickFlowDataSource(BaseDataSource):
-    """基于 TickFlow 免费层的数据源实现。
+    """基于 TickFlow 的数据源实现。
 
-    提供 Shenwan 行业分类 + 股本数据 + 日线 K 线。
-    不提供 index_constituents 和 finance_data。
+    双客户端模式：
+    - 免注册客户端（``TickFlow.free()``）：批量 K 线，60 req/min，100 只/批
+    - 注册客户端（API key）：实时行情 + 标的信息，10 req/min，5 只/次
+
+    Parameters
+    ----------
+    api_key : str, optional
+        TickFlow API key，用于实时行情。不传则仅使用免费层。
     """
 
-    def __init__(self) -> None:
+    def __init__(self, api_key: str | None = None) -> None:
         self._client = None
+        self._rt_client = None
         self._industry_map: dict[str, str] | None = None
-        # TickFlow 免费层: 60 req/min → 1 req/s, burst=60 支持冷启动快速拉取
+        # 尝试从配置文件读取 API key
+        if api_key is None:
+            try:
+                from stockquant.utils.config import Config
+                api_key = Config().get("data_source.tickflow_api_key", None)
+            except Exception:
+                pass
+        self._api_key = api_key
+        # TickFlow 免费层: 60 req/min → 1 req/s
         self._rate_limiter = RateLimiter(rate=1.0, burst=60)
 
     @property
     def client(self):
-        """延迟初始化 TickFlow 客户端（避免 import 时打印 free tier 横幅）。"""
+        """免注册客户端（批量 K 线）。"""
         if self._client is None:
             import tickflow as tf
             self._client = tf.TickFlow.free()
         return self._client
+
+    @property
+    def rt_client(self):
+        """注册客户端（实时行情）。未配置 API key 时返回 None。"""
+        if self._api_key is None:
+            return None
+        if self._rt_client is None:
+            import tickflow as tf
+            self._rt_client = tf.TickFlow(api_key=self._api_key)
+        return self._rt_client
 
     # ------------------------------------------------------------------
     def get_stock_list(self) -> pd.DataFrame:
@@ -350,6 +375,59 @@ class TickFlowDataSource(BaseDataSource):
         if df.empty:
             return df
         return standardize_index(df, normalize_stock_code(code))
+
+    # ------------------------------------------------------------------
+    # 实时行情（需要 API key）
+    # ------------------------------------------------------------------
+
+    def get_realtime_quotes(
+        self, symbols: list[str] | None = None,
+    ) -> pd.DataFrame:
+        """获取实时行情快照。
+
+        需要配置 ``api_key``。注册免费层限制：10 req/min，5 只/次。
+
+        Parameters
+        ----------
+        symbols : list[str], optional
+            标的代码列表（6 位数字）。省略时无法查询（需指定代码）。
+
+        Returns
+        -------
+        DataFrame
+            含 last_price, prev_close, open, high, low, volume, amount 等列。
+        """
+        if self.rt_client is None:
+            logger.warning("实时行情需要配置 TickFlow API key")
+            return pd.DataFrame()
+
+        if not symbols:
+            logger.warning("实时行情需要指定标的代码")
+            return pd.DataFrame()
+
+        tf_symbols = [_to_tf_symbol(s) for s in symbols[:5]]  # 免费层最多5只
+
+        try:
+            self._throttle()
+            df = self.rt_client.quotes.get(
+                symbols=tf_symbols, as_dataframe=True,
+            )
+            if df is None or df.empty:
+                return pd.DataFrame()
+
+            # 标准化列名
+            col_map = {
+                "last_price": "close",
+                "prev_close": "pre_close",
+            }
+            df = df.rename(columns=col_map)
+            df["code"] = df["symbol"].apply(_from_tf_symbol)
+            if "trade_date" in df.columns:
+                df["date"] = pd.to_datetime(df["trade_date"])
+            return df
+        except Exception as e:
+            logger.warning(f"实时行情获取失败: {e}")
+            return pd.DataFrame()
 
     # ------------------------------------------------------------------
     def get_index_constituents(self, index_code: str) -> list[str]:

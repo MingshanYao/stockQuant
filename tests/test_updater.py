@@ -12,33 +12,36 @@ from stockquant.data.updater import DataUpdater
 
 @pytest.fixture
 def updater(tmp_path, monkeypatch):
-    """构造一个隔离的 DataUpdater，用临时 DuckDB。"""
+    """构造一个隔离的 DataUpdater，用临时 DuckDB，强制走逐只路径。"""
     from stockquant.utils.config import Config
     cfg = Config()
     monkeypatch.setattr(cfg, "_data", {**cfg._data})
     cfg.set("database.path", str(tmp_path / "test.duckdb"))
-    cfg.set("data_fetch.max_workers", 1)  # 串行，便于断言
+    cfg.set("data_fetch.max_workers", 1)
     cfg.set("data_fetch.queue_maxsize", 10)
 
     from stockquant.data.database import Database
     db = Database()
-    return DataUpdater(config=cfg, db=db)
+    u = DataUpdater(config=cfg, db=db)
+    # 用 Baostock 替代 TickFlow（不含 batch 方法，强制逐只路径）
+    from stockquant.data.source_baostock import BaoStockDataSource
+    u._source = BaoStockDataSource()
+    return u
 
 
 class TestBatchUpdateConsumeBug:
-    """历史 bug：fetch 返回空 DF 时被静默标记为成功，导致 0 行入库但日志显示成功。"""
+    """历史 bug：空 DF 应计为 failed 而非 success。"""
 
     def test_empty_dataframe_counts_as_failed(self, updater):
         with patch.object(
             updater._source, "get_daily_bars",
-            return_value=pd.DataFrame(),  # 模拟上游返回空
+            return_value=pd.DataFrame(),
         ):
             results = updater.update_codes_daily(
                 ["000001", "600000"],
                 start_date="2024-01-01",
                 end_date="2024-01-05",
             )
-        # 空 DF 不应进入 results 字典
         assert results == {}
 
     def test_exception_counts_as_failed(self, updater):

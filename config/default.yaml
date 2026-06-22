@@ -14,6 +14,7 @@ project:
 data_source:
   primary: tickflow           # 主数据源: tickflow(批量快) / baostock / akshare
   fallback: baostock           # 备用数据源
+  tickflow_api_key: "tk_6350a68e20e244e684710771976d87e1"  # 实时行情（可选）
 
 # ---------- 数据库 ----------
 database:
