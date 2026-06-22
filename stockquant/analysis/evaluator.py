@@ -31,7 +31,7 @@ TRADING_DAYS_PER_YEAR = 252
 # 模块级全局用于 multiprocessing fork（避免 pickle evaluator）
 _evaluator: "FactorEvaluator | None" = None
 
-# 模块级进程池复用——避免每次 _neutralize_panel 重新 fork
+# 模块级进程池复用——避免每次 neutralize_panel 重新 fork
 _pool: ProcessPoolExecutor | None = None
 _pool_lock = threading.Lock()
 
@@ -513,10 +513,18 @@ class FactorEvaluator:
             return self.market_cap.loc[date]
         return None
 
-    def _forward_returns(self, period: int) -> pd.DataFrame:
+    @staticmethod
+    def shutdown_pool() -> None:
+        """关闭模块级进程池，释放 worker 进程内存。
+
+        在完成所有中性化计算后、进入回测阶段前调用。
+        """
+        close_pool()
+
+    def forward_returns(self, period: int) -> pd.DataFrame:
         return self.close.pct_change(periods=period).shift(-period)
 
-    def _neutralize_panel(self, factor: pd.DataFrame) -> pd.DataFrame:
+    def neutralize_panel(self, factor: pd.DataFrame) -> pd.DataFrame:
         """对每日截面做风格中性化，取残差作为纯Alpha因子值（并行化）。
 
         仅在主进程的主线程中启用并行；ThreadPoolExecutor 工作线程或
@@ -567,7 +575,7 @@ class FactorEvaluator:
 
         return result
 
-    def _neutralize_panels_batch(
+    def neutralize_panels_batch(
         self, panels: dict[str, pd.DataFrame],
     ) -> dict[str, pd.DataFrame]:
         """批量风格中性化——一次池提交处理所有因子。
@@ -581,7 +589,7 @@ class FactorEvaluator:
         all_dates = sorted(set().union(*(p.index for p in panels.values())))
         n_dates = len(all_dates)
         if n_dates < 60:
-            return {name: self._neutralize_panel(p) for name, p in panels.items()}
+            return {name: self.neutralize_panel(p) for name, p in panels.items()}
 
         n_workers = min(max(os.cpu_count() - 2, 1), 8)
         chunk_size = max(20, n_dates // n_workers)
@@ -668,12 +676,12 @@ class FactorEvaluator:
         elif fwd_ranked is not None:
             # fwd 已预排名，factor 仍需中性化（除非提供了 factor_neutral）
             # fwd_neutral 仍需用于 FR OLS——如未提供则计算（不常见）
-            factor_neutral = factor_neutral or self._neutralize_panel(factor)
+            factor_neutral = factor_neutral or self.neutralize_panel(factor)
             if fwd_neutral is None:
-                fwd = self._forward_returns(forward_period)
-                fwd_neutral = self._neutralize_panel(fwd)
+                fwd = self.forward_returns(forward_period)
+                fwd_neutral = self.neutralize_panel(fwd)
         else:
-            fwd = self._forward_returns(forward_period)
+            fwd = self.forward_returns(forward_period)
 
             if filter_limit:
                 returns_daily = self.close.pct_change()
@@ -681,8 +689,8 @@ class FactorEvaluator:
                 factor = factor.where(limit_mask.reindex(factor.index))
                 fwd = fwd.where(limit_mask.shift(-forward_period).reindex(fwd.index))
 
-            factor_neutral = self._neutralize_panel(factor)
-            fwd_neutral = self._neutralize_panel(fwd)
+            factor_neutral = self.neutralize_panel(factor)
+            fwd_neutral = self.neutralize_panel(fwd)
 
         common_idx = factor_neutral.index.intersection(fwd_neutral.index)
         common_cols = factor_neutral.columns.intersection(fwd_neutral.columns)
@@ -766,8 +774,8 @@ class FactorEvaluator:
         _evaluator = self
 
         # 预中性化 + 预排名 fwd（主进程，复用模块级进程池）
-        fwd = self._forward_returns(forward_period)
-        fwd_neutral = self._neutralize_panel(fwd)
+        fwd = self.forward_returns(forward_period)
+        fwd_neutral = self.neutralize_panel(fwd)
         fwd_ranked = fwd_neutral.rank(axis=1)  # Spearman 快速路径
 
         kwargs = {**kwargs, "fwd_neutral": fwd_neutral, "fwd_ranked": fwd_ranked}
@@ -811,12 +819,12 @@ class FactorEvaluator:
         使用向量化 numpy 替代逐日 Python 循环计算因子收益率。
         """
         if fwd_neutral is None:
-            fwd_neutral = self._neutralize_panel(self._forward_returns(forward_period))
+            fwd_neutral = self.neutralize_panel(self.forward_returns(forward_period))
 
         if neutralized_factors is None:
             neutralized_factors = {}
             for name, panel in factors.items():
-                neutralized_factors[name] = self._neutralize_panel(panel)
+                neutralized_factors[name] = self.neutralize_panel(panel)
 
         fr_dict: dict[str, np.ndarray] = {}
         common_idx = fwd_neutral.index
@@ -878,12 +886,12 @@ class FactorEvaluator:
             return {}
 
         if fwd_neutral is None:
-            fwd_neutral = self._neutralize_panel(self._forward_returns(forward_period))
+            fwd_neutral = self.neutralize_panel(self.forward_returns(forward_period))
 
         if neutralized_factors is None:
             neutralized_factors = {}
             for name in factors:
-                neutralized_factors[name] = self._neutralize_panel(factors[name])
+                neutralized_factors[name] = self.neutralize_panel(factors[name])
 
         if weights is None:
             weights = {name: 1.0 / len(factors) for name in factors}
@@ -984,12 +992,12 @@ class FactorEvaluator:
             return pd.DataFrame()
 
         if fwd_neutral is None:
-            fwd_neutral = self._neutralize_panel(self._forward_returns(forward_period))
+            fwd_neutral = self.neutralize_panel(self.forward_returns(forward_period))
 
         if neutralized_factors is None:
             neutralized: dict[str, pd.DataFrame] = {}
             for name, panel in factors.items():
-                neutralized[name] = self._neutralize_panel(panel)
+                neutralized[name] = self.neutralize_panel(panel)
         else:
             neutralized = neutralized_factors
 

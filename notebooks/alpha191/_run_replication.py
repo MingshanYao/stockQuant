@@ -17,7 +17,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-from stockquant.data.universe import Pool, StockUniverse
+from stockquant.data.universe import Pool, StockUniverse, BacktestDataset
 from stockquant.indicators.alpha191 import Alpha191Indicators, SKIP_ALPHAS
 from stockquant.analysis.evaluator import FactorEvaluator
 from stockquant.research import AlphaResearcher
@@ -65,8 +65,6 @@ print(f"股票池:   全A股（排除科创板/北交所）")
 print("\n" + "=" * 70)
 print("第1章: 加载全A股数据 (2010-2016)")
 print("=" * 70)
-
-from stockquant.data.universe import Pool, StockUniverse, BacktestDataset
 
 dataset = (
     StockUniverse()
@@ -245,8 +243,8 @@ print(f"  {', '.join(top_factors_by_ic[10:])}")
 # ── 预中性化因子 + 各周期 forward returns，消除重复 neutralize ──
 periods = [1, 2, 3, 4, 5]
 print(f"  预中性化 {top_n} 个因子 + {len(periods)} 周期 forward returns...", flush=True)
-top_neut = {n: evaluator._neutralize_panel(named_factors[n]) for n in top_factors_by_ic}
-fwd_neut_period = {p: evaluator._neutralize_panel(evaluator._forward_returns(p)) for p in periods}
+top_neut = {n: evaluator.neutralize_panel(named_factors[n]) for n in top_factors_by_ic}
+fwd_neut_period = {p: evaluator.neutralize_panel(evaluator.forward_returns(p)) for p in periods}
 # 预排名 fwd（Spearman 专用）——每个周期 rank 一次，所有因子复用
 fwd_ranked_period = {p: panel.rank(axis=1) for p, panel in fwd_neut_period.items()}
 
@@ -391,12 +389,12 @@ candidates = full_eval[full_eval["IC显著"] | full_eval["T显著"]]
 candidate_dict = {name: named_factors[name] for name in candidates.index if name in named_factors}
 print(f"\n预中性化 {len(candidate_dict)} 个候选因子 + forward returns（复用至 Ch7）...", flush=True)
 
-fwd_neut_cache = evaluator._neutralize_panel(evaluator._forward_returns(1))
+fwd_neut_cache = evaluator.neutralize_panel(evaluator.forward_returns(1))
 fwd_ranked_cache = fwd_neut_cache.rank(axis=1)  # 预排名供 Spearman 快速路径
 
 # 批量中性化——一次池提交处理所有因子，消除 O(F×C) 池任务洪水
 print(f"  批量中性化 {len(candidate_dict)} 个因子...", flush=True)
-neut_factors_cache = evaluator._neutralize_panels_batch(candidate_dict)
+neut_factors_cache = evaluator.neutralize_panels_batch(candidate_dict)
 gc.collect()
 print(f"✅ 预中性化完成: {len(neut_factors_cache)} 个因子\n", flush=True)
 
@@ -505,9 +503,8 @@ else:
     print("⚠️ 显著因子不足 2 个，跳过相关性分析")
 
 # ── 释放预中性化内存 + 关闭进程池，为 Ch8 回测腾出 RAM ──
-from stockquant.analysis.evaluator import close_pool
 del neut_factors_cache, fwd_neut_cache, fwd_ranked_cache
-close_pool()
+FactorEvaluator.shutdown_pool()
 gc.collect()
 print("\n📦 已释放预中性化缓存 + 进程池\n")
 

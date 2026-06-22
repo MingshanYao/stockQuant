@@ -140,13 +140,13 @@ t0 = time.monotonic()
 top_neut = {}
 for i, name in enumerate(top_names):
     t_f = time.monotonic()
-    top_neut[name] = evaluator._neutralize_panel(named_factors[name])
+    top_neut[name] = evaluator.neutralize_panel(named_factors[name])
     print(f"  中性化因子 [{i+1}/{len(top_names)}] {name}: {time.monotonic() - t_f:.2f}s", flush=True)
 
 fwd_neut_period = {}
 for p in periods:
     t_f = time.monotonic()
-    fwd_neut_period[p] = evaluator._neutralize_panel(evaluator._forward_returns(p))
+    fwd_neut_period[p] = evaluator.neutralize_panel(evaluator.forward_returns(p))
     print(f"  中性化 fwd T+{p}: {time.monotonic() - t_f:.2f}s", flush=True)
 
 # 预排名 fwd —— 每个周期 rank 一次，所有因子复用
@@ -183,18 +183,18 @@ wall_clock(f"Phase 3 完成: multi_horizon prep={t_prep:.1f}s + eval={t_eval:.1f
 # Phase 4: _neutralize_panel 微基准
 # ═══════════════════════════════════════════════════════════════
 sample_panel = list(named_factors.values())[0]
-fwd_returns = evaluator._forward_returns(1)
+fwd_returns = evaluator.forward_returns(1)
 
 # 首次调用（含 pool 创建）
 t0 = time.monotonic()
-_ = evaluator._neutralize_panel(fwd_returns)
+_ = evaluator.neutralize_panel(fwd_returns)
 t_first = time.monotonic() - t0
 print(f"\n  首次 neutralize (含 pool 创建): {t_first:.2f}s")
 
 # 后续调用（pool 复用）
 t0 = time.monotonic()
 for _ in range(10):
-    _ = evaluator._neutralize_panel(sample_panel)
+    _ = evaluator.neutralize_panel(sample_panel)
 t_reuse = (time.monotonic() - t0) / 10
 print(f"  复用 pool neutralize (avg 10): {t_reuse:.2f}s/call")
 
@@ -206,7 +206,7 @@ for nr, nc in [(100, 50), (250, 100), (500, 200), (1000, 200)]:
                       columns=[f"S{i}" for i in range(nc)])
     t0 = time.monotonic()
     for _ in range(3):
-        _ = evaluator._neutralize_panel(tp)
+        _ = evaluator.neutralize_panel(tp)
     et = (time.monotonic() - t0) / 3
     print(f"    {nr:5d}×{nc:4d} = {nr*nc:8d} cells → {et:.3f}s  ({nr*nc/et:.0f} cells/s)")
 
@@ -223,7 +223,7 @@ print(f"\n  候选因子: {len(candidate_dict)} 个")
 
 t0 = time.monotonic()
 print(f"  批量中性化 {len(candidate_dict)} 个因子...", flush=True)
-neut_cache = evaluator._neutralize_panels_batch(candidate_dict)
+neut_cache = evaluator.neutralize_panels_batch(candidate_dict)
 gc.collect()
 
 elapsed_batch = time.monotonic() - t0
@@ -232,7 +232,7 @@ wall_clock(f"Phase 5 完成: 批量预中性化 {elapsed_batch:.2f}s ({len(neut_
 # ═══════════════════════════════════════════════════════════════
 # Phase 6: 因子体系评价
 # ═══════════════════════════════════════════════════════════════
-fwd_neut_cache = evaluator._neutralize_panel(fwd_returns)
+fwd_neut_cache = evaluator.neutralize_panel(fwd_returns)
 fwd_ranked_cache = fwd_neut_cache.rank(axis=1)  # 预排名供 Spearman 快速路径
 
 t6_start = time.monotonic()
@@ -274,7 +274,7 @@ wall_clock(f"Phase 6 完成: {time.monotonic() - t6_start:.1f}s total")
 # Phase 7: 回测
 # ═══════════════════════════════════════════════════════════════
 from stockquant.research import AlphaResearcher
-from stockquant.analysis.evaluator import close_pool
+from stockquant.analysis.evaluator import FactorEvaluator
 
 researcher = AlphaResearcher(dataset, initial_capital=1_000_000, max_positions=50, rebalance_freq=5)
 sample_name, _ = list(candidate_dict.items())[0]
@@ -288,7 +288,7 @@ print(f"\n  回测: {t_bt:.2f}s  {sample_name}: 收益={az.total_return():+.2%} 
 
 # 清理
 del neut_cache, fwd_neut_cache
-close_pool()
+FactorEvaluator.shutdown_pool()
 gc.collect()
 
 # ═══════════════════════════════════════════════════════════════

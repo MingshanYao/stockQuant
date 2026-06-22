@@ -90,8 +90,8 @@ r1 = evaluator.evaluate(factor_raw, forward_period=1)
 t_baseline = time.time() - t0
 print(f"  基准: {t_baseline:.1f}s  IC={r1['ic_mean']:.4f}  T={r1['t_stat']:.2f}")
 
-fwd_neut = evaluator._neutralize_panel(evaluator._forward_returns(1))
-factor_neut = evaluator._neutralize_panel(factor_raw)
+fwd_neut = evaluator.neutralize_panel(evaluator.forward_returns(1))
+factor_neut = evaluator.neutralize_panel(factor_raw)
 
 t0 = time.time()
 r2 = evaluator.evaluate(factor_raw, forward_period=1,
@@ -110,7 +110,7 @@ r1 = evaluator.evaluate_model_predictive_power(factor_panels, forward_period=1)
 t_baseline = time.time() - t0
 print(f"  基准: {t_baseline:.1f}s  IC={r1['ic_mean']:.4f}")
 
-all_neut = {k: evaluator._neutralize_panel(v) for k, v in factor_panels.items()}
+all_neut = {k: evaluator.neutralize_panel(v) for k, v in factor_panels.items()}
 
 t0 = time.time()
 r2 = evaluator.evaluate_model_predictive_power(

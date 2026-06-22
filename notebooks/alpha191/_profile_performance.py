@@ -141,8 +141,8 @@ multi_names = top_factors[:TOP_N_MULTI]
 multi_factors = {n: named_factors[n] for n in multi_names}
 
 t0_prep = time.time()
-multi_top_neut = {n: evaluator._neutralize_panel(named_factors[n]) for n in multi_names}
-multi_fwd_neut = {p: evaluator._neutralize_panel(evaluator._forward_returns(p)) for p in multi_periods}
+multi_top_neut = {n: evaluator.neutralize_panel(named_factors[n]) for n in multi_names}
+multi_fwd_neut = {p: evaluator.neutralize_panel(evaluator.forward_returns(p)) for p in multi_periods}
 elapsed_prep = time.time() - t0_prep
 print(f"  预中性化: {elapsed_prep:.2f}s ({len(multi_names)} 因子 + {len(multi_periods)} 周期)")
 
@@ -170,19 +170,19 @@ record("multi_horizon (并行+pool复用)", elapsed_multi, TOP_N_MULTI * len(per
 # ═══════════════════════════════════════════════════════════════
 section("Phase 4: _neutralize_panel 微基准")
 
-fwd_returns = evaluator._forward_returns(1)
+fwd_returns = evaluator.forward_returns(1)
 sample_panel = list(named_factors.values())[0]
 
 # 4a. 单次 neutralize
 t0 = time.time()
-_ = evaluator._neutralize_panel(fwd_returns)
+_ = evaluator.neutralize_panel(fwd_returns)
 elapsed_fwd = time.time() - t0
 
 # 4b. 连续 neutralize N 次 (simulate sequential calls)
 N_bench = 20
 t0 = time.time()
 for i in range(N_bench):
-    _ = evaluator._neutralize_panel(sample_panel)
+    _ = evaluator.neutralize_panel(sample_panel)
 elapsed_seq = time.time() - t0
 
 # 4c. 不同面板大小的复杂度
@@ -196,7 +196,7 @@ for n_rows, n_cols in sizes:
     )
     t0 = time.time()
     for _ in range(5):
-        _ = evaluator._neutralize_panel(test_panel)
+        _ = evaluator.neutralize_panel(test_panel)
     elapsed = (time.time() - t0) / 5
     size_results.append((n_rows, n_cols, elapsed))
 
@@ -225,7 +225,7 @@ candidate_dict = {name: named_factors[name]
 print(f"  候选因子: {len(candidate_dict)} 个")
 
 t0_fwd = time.time()
-fwd_neut_cache = evaluator._neutralize_panel(fwd_returns)
+fwd_neut_cache = evaluator.neutralize_panel(fwd_returns)
 elapsed_fwd_neut = time.time() - t0_fwd
 
 t0 = time.time()
@@ -236,7 +236,7 @@ total = len(items)
 def _par_neut(name_panel):
     name, panel = name_panel
     try:
-        return name, evaluator._neutralize_panel(panel)
+        return name, evaluator.neutralize_panel(panel)
     except Exception:
         return name, None
 

@@ -30,7 +30,7 @@ ALL_ALPHA_IDS = [i for i in range(1, 192) if i not in SKIP_ALPHAS]
 print("=" * 70)
 print("Alpha191 因子系统研究 — 沪深300 因子评价体系")
 print("=" * 70)
-print(f"研究因子: {len(ALL_ALPHA_IDS)} 个 Alpha191 因子（排除 Alpha030）")
+print(f"研究因子: {len(ALL_ALPHA_IDS)} 个 Alpha191 因子")
 print(f"回测区间: {START_DATE} ~ {END_DATE}")
 
 # ======================================================================
