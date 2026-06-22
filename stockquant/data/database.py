@@ -146,6 +146,7 @@ class Database:
             "out_date": "DATE",
             "status": "INTEGER",
             "industry_source": "VARCHAR",
+            "industry_code": "VARCHAR",
             "data_start": "DATE",
             "data_end": "DATE",
         }
