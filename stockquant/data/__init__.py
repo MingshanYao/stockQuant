@@ -17,6 +17,7 @@ from .data_cleaner import DataCleaner
 # 触发数据源注册（副作用 import）
 from . import source_akshare  # noqa: F401
 from . import source_baostock  # noqa: F401
+from . import source_tickflow  # noqa: F401
 
 from .data_manager import DataManager
 from .universe import Pool, StockUniverse, BacktestDataset

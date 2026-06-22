@@ -12,8 +12,8 @@ project:
 
 # ---------- 数据源 ----------
 data_source:
-  primary: baostock           # 主数据源: baostock / akshare
-  fallback: akshare           # 备用数据源
+  primary: tickflow           # 主数据源: tickflow(批量快) / baostock / akshare
+  fallback: baostock           # 备用数据源
 
 # ---------- 数据库 ----------
 database:
@@ -41,7 +41,7 @@ data_fetch:
   adjust: hfq               # 复权方式: qfq(前复权) / hfq(后复权) / none
   frequency: daily          # daily / weekly / monthly / 1min / 5min / 15min / 30min / 60min
   # 批量拉取并发参数（AkShare 上游对高并发敏感，默认值偏保守）
-  max_workers: 4            # 最大并发线程数；过高易触发限流封 IP
+  max_workers: 1            # 最大并发线程数；BaoStock 不支持真正并发，串行更稳定
   timeout: 30               # 单次 fetch 超时秒数
   queue_maxsize: 200        # 生产-消费队列容量（背压）
 

@@ -227,30 +227,8 @@ class BaoStockDataSource(BaseDataSource):
         if "isST" in df.columns:
             df["isST"] = pd.to_numeric(df["isST"], errors="coerce").fillna(0).astype(int)
 
-        # 拉取后复权因子（从 1990 年起，确保覆盖所有历史除权事件）
-        adj_df = self.get_adjust_factor(code, start_date="1990-01-01", end_date=ed)
-        if not adj_df.empty and "backAdjustFactor" in adj_df.columns:
-            adj_df["dividOperateDate"] = pd.to_datetime(adj_df["dividOperateDate"])
-            adj_df["backAdjustFactor"] = pd.to_numeric(
-                adj_df["backAdjustFactor"], errors="coerce"
-            )
-            adj_df = adj_df.sort_values("dividOperateDate")
-
-            df["date"] = pd.to_datetime(df["date"])
-            df = df.sort_values("date")
-            # merge_asof: 每个交易日匹配最近的历史除权因子
-            df = pd.merge_asof(
-                df,
-                adj_df[["dividOperateDate", "backAdjustFactor"]],
-                left_on="date",
-                right_on="dividOperateDate",
-                direction="backward",
-            )
-            df = df.drop(columns=["dividOperateDate"])
-            df["adj_factor"] = df["backAdjustFactor"].fillna(1.0)
-            df = df.drop(columns=["backAdjustFactor"])
-        else:
-            df["adj_factor"] = 1.0
+        # 复权因子先置 1.0，后续由 update_adj_factors 批量补齐
+        df["adj_factor"] = 1.0
 
         return standardize_daily(df, normalize_stock_code(code), volume_unit="shares")
 

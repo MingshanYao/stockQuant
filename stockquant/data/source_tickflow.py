@@ -183,55 +183,123 @@ class TickFlowDataSource(BaseDataSource):
         end_date: str | dt.date,
         adjust: str = "hfq",
     ) -> pd.DataFrame:
-        """获取日线行情。
+        """获取日线行情（raw OHLCV + adj_factor）。
 
-        TickFlow adjust: qfq→forward, hfq→backward, none→none。
+        内部拉取 raw + hfq 两份数据，计算 adj_factor = hfq_close / raw_close。
         """
-        tf_sym = _to_tf_symbol(code)
+        # 复用批量接口
+        result = self.get_daily_bars_batch(
+            [normalize_stock_code(code)], start_date, end_date, adjust,
+        )
+        return result.get(normalize_stock_code(code), pd.DataFrame())
+
+    # ------------------------------------------------------------------
+    def get_daily_bars_batch(
+        self,
+        codes: list[str],
+        start_date: str | dt.date,
+        end_date: str | dt.date,
+        adjust: str = "hfq",
+    ) -> dict[str, pd.DataFrame]:
+        """批量获取多只股票的日线行情（最多 100 只/请求）。
+
+        策略：拉取不复权 OHLCV（adjust='none'）作为主体，
+        同时拉取后复权收盘价计算 adj_factor = hfq_close / raw_close，
+        确保 VWAP 和 OHLC 在同一价格空间，且 adj_factor 正确。
+
+        Parameters
+        ----------
+        codes : list[str]
+            股票代码列表（纯 6 位数字），每批最多 100 只。
+        adjust : str
+            保留参数兼容性，实际始终存储 raw + adj_factor。
+
+        Returns
+        -------
+        dict[str, DataFrame]
+            {code: DataFrame}，含 raw OHLCV + adj_factor。
+        """
         sd = ensure_date(start_date)
         ed = ensure_date(end_date)
-
         days = max((ed - sd).days + 1, 1)
         count = min(days * 2, 10000)
+        tf_symbols = [_to_tf_symbol(c) for c in codes]
 
-        adjust_map = {"qfq": "forward", "hfq": "backward", "none": "none"}
-        tf_adjust = adjust_map.get(adjust, "backward")
-
-        def _fetch() -> pd.DataFrame:
+        def _fetch_raw():
             self._throttle()
-            return self.client.klines.get(
-                tf_sym,
-                period="1d",
-                count=count,
-                start_time=_date_to_ms(sd),
-                end_time=_date_to_ms(ed),
-                adjust=tf_adjust,
-                as_dataframe=True,
+            return self.client.klines.batch(
+                tf_symbols, period="1d", count=count,
+                start_time=_date_to_ms(sd), end_time=_date_to_ms(ed),
+                adjust="none", as_dataframe=True,
+                batch_size=100, show_progress=False,
             )
 
+        def _fetch_hfq():
+            self._throttle()
+            return self.client.klines.batch(
+                tf_symbols, period="1d", count=count,
+                start_time=_date_to_ms(sd), end_time=_date_to_ms(ed),
+                adjust="backward", as_dataframe=True,
+                batch_size=100, show_progress=False,
+            )
+
+        # 并行拉取 raw + hfq
         try:
-            df = call_with_retries(_fetch, attempts=3, label=f"TickFlow K线 {code}")
+            raw_result = call_with_retries(
+                _fetch_raw, attempts=2, label=f"TickFlow raw ({len(codes)}只)",
+            )
         except Exception as e:
-            logger.warning(f"TickFlow K线获取失败 {code}: {e}")
-            return pd.DataFrame()
+            logger.warning(f"TickFlow raw 批量K线失败: {e}")
+            return {}
 
-        if df is None or df.empty:
-            return pd.DataFrame()
+        try:
+            hfq_result = call_with_retries(
+                _fetch_hfq, attempts=2, label=f"TickFlow hfq ({len(codes)}只)",
+            )
+        except Exception as e:
+            logger.warning(f"TickFlow hfq 批量K线失败: {e}")
+            hfq_result = {}
 
-        if "trade_date" in df.columns:
-            df["date"] = pd.to_datetime(df["trade_date"])
-        elif "timestamp" in df.columns:
-            df["date"] = pd.to_datetime(df["timestamp"], unit="ms")
+        if not raw_result:
+            return {}
 
-        for col in ["open", "high", "low", "close", "volume", "amount"]:
-            if col not in df.columns:
-                df[col] = 0.0
+        result: dict[str, pd.DataFrame] = {}
+        for tf_sym, df_raw in raw_result.items():
+            if df_raw is None or df_raw.empty:
+                continue
+            code = _from_tf_symbol(tf_sym)
+            df = df_raw.copy()
 
-        df["date"] = pd.to_datetime(df["date"])
-        df = df[(df["date"] >= pd.Timestamp(sd)) & (df["date"] <= pd.Timestamp(ed))]
-        if df.empty:
-            return df
-        return standardize_daily(df, normalize_stock_code(code))
+            # 标准化日期
+            if "trade_date" in df.columns:
+                df["date"] = pd.to_datetime(df["trade_date"])
+            elif "timestamp" in df.columns:
+                df["date"] = pd.to_datetime(df["timestamp"], unit="ms")
+
+            # 计算 adj_factor = hfq_close / raw_close
+            df_hfq = hfq_result.get(tf_sym) if hfq_result else None
+            if df_hfq is not None and not df_hfq.empty and "close" in df_hfq.columns:
+                hfq_close = df_hfq["close"].reset_index(drop=True)
+                raw_close = df["close"].reset_index(drop=True)
+                adj = hfq_close / raw_close.replace(0, float("nan"))
+                adj = adj.replace([float("inf"), float("-inf")], float("nan"))
+                df["adj_factor"] = adj.fillna(1.0)
+            else:
+                df["adj_factor"] = 1.0
+
+            # 确保必要列存在
+            for col in ["open", "high", "low", "close", "volume", "amount"]:
+                if col not in df.columns:
+                    df[col] = 0.0
+
+            df["date"] = pd.to_datetime(df["date"])
+            df = df[(df["date"] >= pd.Timestamp(sd)) & (df["date"] <= pd.Timestamp(ed))]
+            if df.empty:
+                continue
+
+            result[code] = standardize_daily(df, code, volume_unit="lots")
+
+        return result
 
     # ------------------------------------------------------------------
     def get_index_daily(

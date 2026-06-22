@@ -142,7 +142,8 @@ class DataUpdater:
         include_delisted: bool = False,
     ) -> dict[str, int]:
         """更新全部 A 股日线数据。"""
-        codes = self._get_all_a_codes(include_delisted=include_delisted)
+        end_date_dt = ensure_date(end_date) if end_date else dt.date.today()
+        codes = self._get_all_a_codes(include_delisted=include_delisted, end_date=end_date_dt)
         codes = filter_codes(
             codes,
             include_star=include_star,
@@ -330,6 +331,81 @@ class DataUpdater:
             logger.error(f"市值计算失败: {e}")
             return 0
 
+    def update_adj_factors(self, codes: list[str] | None = None) -> int:
+        """为 daily_bars 批量补齐后复权因子（backAdjustFactor）。
+
+        对每只股票查询 ``query_adjust_factor``，通过 merge_asof
+        前向填充到每个交易日，一次性 UPDATE 该股票的全部日线。
+        """
+        if not self.db.table_exists("daily_bars"):
+            logger.warning("daily_bars 表不存在")
+            return 0
+
+        if codes is None:
+            result = self.db.query("SELECT DISTINCT code FROM daily_bars")
+            if result.empty:
+                logger.warning("daily_bars 表为空")
+                return 0
+            codes = result["code"].astype(str).str.zfill(6).tolist()
+
+        logger.info(f"开始补齐复权因子: {len(codes)} 只股票")
+        updated = 0
+
+        for i, code in enumerate(codes, 1):
+            code = normalize_stock_code(code)
+            try:
+                adj_df = self._source.get_adjust_factor(
+                    code, start_date="1990-01-01", end_date="2099-12-31",
+                )
+                if adj_df.empty or "backAdjustFactor" not in adj_df.columns:
+                    continue
+
+                adj_df["dividOperateDate"] = pd.to_datetime(adj_df["dividOperateDate"])
+                adj_df["backAdjustFactor"] = pd.to_numeric(
+                    adj_df["backAdjustFactor"], errors="coerce"
+                )
+                adj_df = adj_df.sort_values("dividOperateDate")
+
+                daily = self.db.query(
+                    "SELECT date FROM daily_bars WHERE code = ? ORDER BY date",
+                    [code],
+                )
+                if daily.empty:
+                    continue
+                daily["date"] = pd.to_datetime(daily["date"])
+                daily = daily.sort_values("date")
+
+                daily = pd.merge_asof(
+                    daily,
+                    adj_df[["dividOperateDate", "backAdjustFactor"]],
+                    left_on="date",
+                    right_on="dividOperateDate",
+                    direction="backward",
+                )
+                daily["adj_factor"] = daily["backAdjustFactor"].fillna(1.0)
+                daily = daily[["date", "adj_factor"]]
+                daily["date"] = daily["date"].dt.date
+
+                # 注册临时表，一条 UPDATE FROM 完成该股全部日期更新
+                self.db.conn.register("_tmp_adj", daily)
+                self.db.execute(f"""
+                    UPDATE daily_bars
+                    SET adj_factor = _tmp_adj.adj_factor
+                    FROM _tmp_adj
+                    WHERE daily_bars.code = '{code}'
+                      AND daily_bars.date = _tmp_adj.date
+                """)
+                self.db.conn.unregister("_tmp_adj")
+                updated += 1
+            except Exception as e:
+                logger.warning(f"{code} 复权因子更新失败: {e}")
+
+            if i % 300 == 0 or i == len(codes):
+                logger.info(f"  [{i}/{len(codes)}] 复权因子进度")
+
+        logger.info(f"复权因子补齐完成: {updated} 只")
+        return updated
+
     def update_financials(
         self,
         codes: list[str] | None = None,
@@ -401,55 +477,61 @@ class DataUpdater:
     # 内部：代码列表
     # ------------------------------------------------------------------
 
-    def _get_all_a_codes(self, include_delisted: bool = False) -> list[str]:
-        """获取全部 A 股代码。
+    def _get_all_a_codes(
+        self, include_delisted: bool = False, end_date: dt.date | None = None,
+    ) -> list[str]:
+        """获取全部 A 股代码（优先从本地 stock_info 读取）。
 
         Parameters
         ----------
         include_delisted : bool
-            False: 仅当前上市股票（``get_stock_list``）。
-            True:  含退市股（``get_stock_info``），按历史覆盖范围过滤。
+            False: 仅当前上市股票。
+            True:  含退市股。
+        end_date : dt.date, optional
+            目标区间结束日期，自动跳过上市日晚于此日期的股票。
         """
-        if not include_delisted:
+        # 优先从本地 stock_info 读取（已由 update_stock_info 写入）
+        if self.db.table_exists("stock_info"):
             try:
-                df = call_with_retries(
-                    self._source.get_stock_list,
-                    label="source.get_stock_list",
-                )
+                conditions = ["1=1"]
+                if not include_delisted:
+                    conditions.append("(status = 1 OR status IS NULL)")
+                if end_date:
+                    conditions.append(f"list_date <= '{end_date}'")
+                where = " AND ".join(conditions)
+                df = self.db.query(f"SELECT code, status FROM stock_info WHERE {where}")
+                if not df.empty:
+                    codes = df["code"].astype(str).str.zfill(6).tolist()
+                    n_listed = (df["status"] == 1).sum() if "status" in df.columns else len(codes)
+                    logger.info(
+                        f"全部 A 股（本地 stock_info）: {len(codes)} 只 "
+                        f"（上市: {n_listed}, "
+                        f"退市: {len(codes) - n_listed}）"
+                    )
+                    return codes
             except Exception as e:
-                logger.error(f"获取 A 股列表失败: {e}")
-                return []
-            if df.empty:
-                return []
-            codes = df["code"].astype(str).str.zfill(6).tolist()
-            logger.info(f"全部 A 股（仅上市）: {len(codes)} 只")
-            return codes
+                logger.debug(f"本地 stock_info 读取失败: {e}")
 
-        # 含退市股：走 get_stock_info，过滤掉退市早于 2010 年的（无日线数据）
+        # fallback: 从数据源获取
         try:
-            df = call_with_retries(
-                self._source.get_stock_info,
-                label="source.get_stock_info",
-            )
+            fn = self._source.get_stock_info if include_delisted else self._source.get_stock_list
+            df = call_with_retries(fn, label=f"source.{fn.__name__}")
         except Exception as e:
             logger.error(f"获取 A 股列表失败: {e}")
             return []
         if df.empty:
             return []
-        # 过滤：上市日期在合理范围 + 退市日期不早于 2010 年
-        if "list_date" in df.columns:
-            df["list_date"] = pd.to_datetime(df["list_date"], errors="coerce")
-            df = df[df["list_date"].notna()]
-        if "out_date" in df.columns:
+
+        if include_delisted and "out_date" in df.columns:
             df["out_date"] = pd.to_datetime(df["out_date"], errors="coerce")
             cutoff = pd.Timestamp("2010-01-01")
             df = df[df["out_date"].isna() | (df["out_date"] >= cutoff)]
+        if end_date and "list_date" in df.columns:
+            df["list_date"] = pd.to_datetime(df["list_date"], errors="coerce")
+            df = df[df["list_date"] <= pd.Timestamp(str(end_date))]
+
         codes = df["code"].astype(str).str.zfill(6).tolist()
-        logger.info(
-            f"全部 A 股（含退市, 2010年后活跃）: {len(codes)} 只 "
-            f"（上市: {(df['status'] == 1).sum() if 'status' in df.columns else '?'}, "
-            f"退市: {(df['status'] == 0).sum() if 'status' in df.columns else '?'}）"
-        )
+        logger.info(f"全部 A 股（数据源）: {len(codes)} 只")
         return codes
 
     # ------------------------------------------------------------------
@@ -513,19 +595,126 @@ class DataUpdater:
         end_date: str | dt.date | None = None,
         adjust: str | None = None,
     ) -> dict[str, int]:
-        """批量拉取 & 入库（生产者-消费者模型，抓取并发 + 写入串行）。"""
+        """批量拉取 & 入库。
+
+        自动检测数据源能力：支持批量接口（get_daily_bars_batch）时走批量通道，
+        否则走逐只并发通道。
+        """
         adjust = adjust or self.cfg.get("data_fetch.adjust", "hfq")
         end_date = ensure_date(end_date) or dt.date.today()
         codes = [normalize_stock_code(c) for c in codes]
 
-        # 预加载全量日期范围（O(1) 查 data_end，替代 N 次 SELECT MAX 查询）
         date_ranges = self.db.get_date_ranges()
 
+        # 过滤已是最新的股票
+        pending_codes = []
+        for code in codes:
+            sd = self._resolve_start_date(code, start_date, date_ranges=date_ranges)
+            if sd <= end_date:
+                pending_codes.append(code)
+
+        if not pending_codes:
+            logger.info("所有股票已是最新，无需更新")
+            return {}
+
+        # 检测是否支持批量拉取
+        if hasattr(self._source, "get_daily_bars_batch"):
+            return self._batch_update_via_batch(
+                pending_codes, start_date, end_date, adjust, date_ranges,
+            )
+
+        return self._batch_update_per_stock(
+            pending_codes, start_date, end_date, adjust, date_ranges,
+        )
+
+    def _batch_update_via_batch(
+        self,
+        codes: list[str],
+        start_date: str | dt.date | None,
+        end_date: dt.date,
+        adjust: str,
+        date_ranges: dict[str, tuple],
+    ) -> dict[str, int]:
+        """通过数据源的 get_daily_bars_batch 批量拉取（100 只/批）。"""
+        batch_size = 100
+        results: dict[str, int] = {}
+        failed: list[str] = []
+        total = len(codes)
+        t0 = __import__("time").monotonic()
+
+        for i in range(0, total, batch_size):
+            chunk = codes[i:i + batch_size]
+            batch_no = i // batch_size + 1
+            total_batches = (total + batch_size - 1) // batch_size
+
+            # 每只股票的起始日期（增量更新）
+            fetch_codes = []
+            for code in chunk:
+                sd = self._resolve_start_date(code, start_date, date_ranges=date_ranges)
+                if sd <= end_date:
+                    fetch_codes.append(code)
+
+            if not fetch_codes:
+                continue
+
+            logger.info(
+                f"[批量 {batch_no}/{total_batches}] 拉取 {len(fetch_codes)} 只..."
+            )
+            try:
+                batch_result = self._source.get_daily_bars_batch(
+                    fetch_codes, start_date, end_date, adjust,
+                )
+            except Exception as e:
+                logger.error(f"批量拉取失败: {e}")
+                failed.extend(fetch_codes)
+                continue
+
+            for code in fetch_codes:
+                df = batch_result.get(code)
+                if df is None or df.empty:
+                    failed.append(code)
+                    continue
+                try:
+                    df = self.cleaner.clean_pipeline(df)
+                    rows = self.db.insert_or_ignore(df, "daily_bars")
+                    results[code] = rows
+                except Exception as e:
+                    failed.append(code)
+                    logger.warning(f"{code} 写入失败: {e}")
+
+            written = len(results)
+            elapsed = __import__("time").monotonic() - t0
+            logger.info(
+                f"[批量 {batch_no}/{total_batches}] 完成: {written}/{total} 只"
+                f" ({written / elapsed:.1f}/s)"
+            )
+
+        if results:
+            self.db.refresh_daily_date_ranges(list(results.keys()))
+
+        elapsed = __import__("time").monotonic() - t0
+        logger.info(
+            f"批量更新完成: 共 {total} 只, 成功 {len(results)}, "
+            f"失败 {len(failed)}, 耗时 {elapsed:.1f}s"
+        )
+        if failed:
+            logger.warning(f"失败代码 (前20): {failed[:20]}")
+        return results
+
+    def _batch_update_per_stock(
+        self,
+        codes: list[str],
+        start_date: str | dt.date | None,
+        end_date: dt.date,
+        adjust: str,
+        date_ranges: dict[str, tuple],
+    ) -> dict[str, int]:
+        """逐只并发拉取（BaoStock 等不支持批量的源）。"""
         results: dict[str, int] = {}
         failed: list[str] = []
 
         fetch_timeout = int(self.cfg.get("data_fetch.timeout", 30))
-        max_workers = int(self.cfg.get("data_fetch.max_workers", 4))
+        max_workers = int(self.cfg.get("data_fetch.max_workers", 1))
         q_maxsize = int(self.cfg.get("data_fetch.queue_maxsize", 200))
 
         def _fetch(code: str) -> pd.DataFrame:
@@ -564,10 +753,8 @@ class DataUpdater:
             label="日线更新",
         )
 
-        # 批量刷新日期范围（一次 SQL 替代逐条 UPDATE）
-        written_codes = list(results.keys())
-        if written_codes:
-            self.db.refresh_daily_date_ranges(written_codes)
+        if results:
+            self.db.refresh_daily_date_ranges(list(results.keys()))
 
         logger.info(
             f"批量更新完成: 共 {total} 只, 成功 {len(results)}, "
@@ -599,7 +786,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--mode",
-        choices=("all", "stock_info", "benchmark", "index", "codes", "financials"),
+        choices=("all", "stock_info", "benchmark", "index", "codes", "financials", "adj_factors"),
         default="all",
         help="更新模式 (默认: all)",
     )
@@ -694,6 +881,10 @@ def main() -> None:
         elif args.mode == "financials":
             rows = updater.update_financials(codes=args.codes or None)
             print(f"财报更新完成: {rows} 条记录")
+            return
+        elif args.mode == "adj_factors":
+            rows = updater.update_adj_factors(codes=args.codes or None)
+            print(f"复权因子补齐完成: {rows} 只")
             return
         else:
             parser.error(f"未知 mode: {args.mode}")
