@@ -122,3 +122,77 @@ def filter_cond(
 def sumac(x: pd.DataFrame | pd.Series) -> pd.DataFrame | pd.Series:
     """累计求和。"""
     return x.cumsum()
+
+
+def regresi(
+    y: pd.DataFrame | pd.Series,
+    x: pd.DataFrame,
+    n: int,
+) -> pd.DataFrame | pd.Series:
+    """滚动窗口多元 OLS 回归残差。
+
+    对每个时间窗口 [t-n+1, t]，用 y 对 x 的每一列做 OLS，
+    返回窗口最后一期的残差 ε_t = y_t - ŷ_t。
+
+    对应 Alpha191 公式中的 REGRESI(y, x_1, x_2, ..., n) 运算符。
+
+    Parameters
+    ----------
+    y : DataFrame or Series
+        因变量（如每只股票的日收益率面板）。
+    x : DataFrame
+        自变量矩阵，每列为一个因子（如 MKT/SMB/HML）。
+        index 需与 y 的 index 对齐，值对所有股票相同。
+    n : int
+        滚动窗口长度。
+
+    Returns
+    -------
+    DataFrame or Series
+        残差序列，形状与 y 相同。
+    """
+    x_values = x.values
+
+    if isinstance(y, pd.DataFrame):
+        result = pd.DataFrame(index=y.index, columns=y.columns, dtype=float)
+        for col in y.columns:
+            yc = y[col].values
+            vals = np.full(len(yc), np.nan)
+            for i in range(max(n - 1, 0), len(yc)):
+                y_win = yc[i - n + 1: i + 1]
+                x_win = x_values[i - n + 1: i + 1]
+                valid = np.isfinite(y_win) & np.all(np.isfinite(x_win), axis=1)
+                if valid.sum() < max(3, x.shape[1] + 1):
+                    continue
+                try:
+                    coef, _, _, _ = np.linalg.lstsq(
+                        np.column_stack([np.ones(valid.sum()), x_win[valid]]),
+                        y_win[valid],
+                        rcond=None,
+                    )
+                    pred = coef[0] + x_win[-1] @ coef[1:]
+                    vals[i] = float(y_win[-1] - pred)
+                except np.linalg.LinAlgError:
+                    vals[i] = np.nan
+            result[col] = vals
+        return result
+    else:
+        y_arr = y.values
+        vals = np.full(len(y_arr), np.nan)
+        for i in range(max(n - 1, 0), len(y_arr)):
+            y_win = y_arr[i - n + 1: i + 1]
+            x_win = x_values[i - n + 1: i + 1]
+            valid = np.isfinite(y_win) & np.all(np.isfinite(x_win), axis=1)
+            if valid.sum() < max(3, x.shape[1] + 1):
+                continue
+            try:
+                coef, _, _, _ = np.linalg.lstsq(
+                    np.column_stack([np.ones(valid.sum()), x_win[valid]]),
+                    y_win[valid],
+                    rcond=None,
+                )
+                pred = coef[0] + x_win[-1] @ coef[1:]
+                vals[i] = float(y_arr[i] - pred)
+            except np.linalg.LinAlgError:
+                vals[i] = np.nan
+        return pd.Series(vals, index=y.index)

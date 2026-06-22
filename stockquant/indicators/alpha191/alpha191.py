@@ -48,6 +48,7 @@ from stockquant.indicators.alpha191.operators import (
     highday,
     lowday,
     regbeta,
+    regresi,
     sequence,
     sumac,
     sumif,
@@ -142,12 +143,14 @@ class Alpha191Indicators(BaseIndicator):
 
         bm_close = None
         bm_open = None
+        bm_mkt = None
         if dataset.benchmark is not None and not dataset.benchmark.empty:
             bm = dataset.benchmark.copy()
             bm["date"] = pd.to_datetime(bm["date"])
             bm = bm.set_index("date").sort_index()
             if "close" in bm.columns:
                 bm_close = bm["close"]
+                bm_mkt = bm_close.pct_change()  # 基准收益作为 MKT 因子
             if "open" in bm.columns:
                 bm_open = bm["open"]
 
@@ -161,6 +164,7 @@ class Alpha191Indicators(BaseIndicator):
             vwap=_pivot("vwap"),
             benchmark_close=bm_close,
             benchmark_open=bm_open,
+            mkt=bm_mkt,
         )
 
     @staticmethod
@@ -206,6 +210,9 @@ class Alpha191Engine:
         returns: pd.DataFrame | None = None,
         benchmark_close: pd.Series | None = None,
         benchmark_open: pd.Series | None = None,
+        mkt: pd.Series | None = None,
+        smb: pd.Series | None = None,
+        hml: pd.Series | None = None,
     ) -> None:
         self.open = open_
         self.high = high
@@ -226,6 +233,15 @@ class Alpha191Engine:
         self.returns = returns if returns is not None else close.pct_change()
         self.benchmark_close = benchmark_close
         self.benchmark_open = benchmark_open
+
+        # Fama-French 三因子（用于 Alpha030）
+        self._mkt = self._resolve_ff_factor(
+            mkt,
+            fallback_name="MKT",
+            fallback_series=benchmark_close.pct_change() if benchmark_close is not None else None,
+        )
+        self._smb = self._resolve_ff_factor(smb, fallback_name="SMB", fallback_series=None)
+        self._hml = self._resolve_ff_factor(hml, fallback_name="HML", fallback_series=None)
         self._cache: dict[str, Any] = {}
 
     # ==================================================================
@@ -266,6 +282,19 @@ class Alpha191Engine:
             index=self.close.index,
             columns=self.close.columns,
         )
+
+    @staticmethod
+    def _resolve_ff_factor(
+        provided: pd.Series | None,
+        fallback_name: str,
+        fallback_series: pd.Series | None,
+    ) -> pd.Series:
+        """解析 Fama-French 因子：优先使用传入值，否则用 fallback，都无则返回全零。"""
+        if provided is not None:
+            return provided
+        if fallback_series is not None:
+            return fallback_series
+        return pd.Series(dtype=float)
 
     # ==================================================================
     # 批量计算
@@ -509,7 +538,38 @@ class Alpha191Engine:
         d6 = delay(self.close, 6)
         return (self.close - d6) / (d6 + 1e-10) * self.volume
 
-    # Alpha030 需要三因子模型，跳过
+    def alpha030(self) -> pd.DataFrame:
+        """WMA((REGRESI(CLOSE/DELAY(CLOSE)-1, MKT, SMB, HML, 60))^2, 20)
+
+        衡量个股日收益中无法被 Fama-French 三因子（市场/规模/价值）
+        解释的特质波动率（20天加权移动平均）。
+        """
+        ret = self.close / delay(self.close, 1) - 1  # 日收益率面板
+
+        # 构建三因子矩阵 — 所有股票共用同一组时间序列因子
+        mkt_vals = self._mkt.reindex(self.close.index).values
+        smb_vals = self._smb.reindex(self.close.index).values
+        hml_vals = self._hml.reindex(self.close.index).values
+
+        # 若三因子均为零（未提供且无回退），直接使用原始收益
+        mkt_finite = np.isfinite(mkt_vals).any()
+        smb_finite = np.isfinite(smb_vals).any()
+        hml_finite = np.isfinite(hml_vals).any()
+
+        if not mkt_finite and not smb_finite and not hml_finite:
+            # 无因子数据，使用原始收益波动率
+            return wma(ret ** 2, 20)
+
+        x = pd.DataFrame(
+            {
+                "MKT": np.where(np.isfinite(mkt_vals), mkt_vals, 0.0),
+                "SMB": np.where(np.isfinite(smb_vals), smb_vals, 0.0),
+                "HML": np.where(np.isfinite(hml_vals), hml_vals, 0.0),
+            },
+            index=self.close.index,
+        )
+        resid = regresi(ret, x, 60)
+        return wma(resid ** 2, 20)
 
     # ==================================================================
     # Alpha #031 – #040

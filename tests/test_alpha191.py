@@ -215,7 +215,7 @@ class TestAlpha191Factors001to050:
             close=data["close"], volume=data["volume"], amount=data["amount"],
         )
 
-    @pytest.mark.parametrize("alpha_id", [1, 2, 5, 7, 10, 13, 14, 15, 20, 38, 41, 42, 46, 48, 50])
+    @pytest.mark.parametrize("alpha_id", [1, 2, 5, 7, 10, 13, 14, 15, 20, 30, 38, 41, 42, 46, 48, 50])
     def test_factor_shape_and_finite(self, engine, alpha_id):
         result = engine.compute_factor(alpha_id)
         assert isinstance(result, pd.DataFrame)
@@ -237,6 +237,40 @@ class TestAlpha191Factors001to050:
         result = engine.alpha013()
         expected = (engine.high * engine.low) ** 0.5 - engine.vwap
         pd.testing.assert_frame_equal(result, expected, check_names=False)
+
+    def test_alpha030_computes_without_ff_factors(self, engine):
+        """alpha030 不传 MKT/SMB/HML 时应能用原始收益波动率正常计算。"""
+        result = engine.alpha030()
+        assert isinstance(result, pd.DataFrame)
+        assert result.shape == engine.close.shape
+        finite_ratio = np.isfinite(result.values).mean()
+        assert finite_ratio > 0.3, f"Alpha030 有效值比例过低: {finite_ratio:.2%}"
+
+    def test_alpha030_with_mkt_factor(self):
+        """alpha030 有 MKT 因子时应走三因子回归路径。"""
+        from stockquant.indicators.alpha191.alpha191 import Alpha191Engine
+        from stockquant.indicators.alpha191.operators import wma
+        data = _make_test_dataset(n_days=120, n_stocks=10)
+
+        # 构造假 MKT 因子（市场日收益序列）
+        rng = np.random.default_rng(123)
+        mkt_series = pd.Series(
+            rng.normal(0.0005, 0.015, 120),
+            index=data["close"].index,
+        )
+
+        engine = Alpha191Engine(
+            open_=data["open"], high=data["high"], low=data["low"],
+            close=data["close"], volume=data["volume"], amount=data["amount"],
+            mkt=mkt_series,
+        )
+        result = engine.alpha030()
+        assert isinstance(result, pd.DataFrame)
+        assert result.shape == engine.close.shape
+        finite_ratio = np.isfinite(result.values).mean()
+        # 有 MKT 因子时，需要使用足够长窗口(60天)做回归，前59天为NaN
+        # 后61天应有有效值
+        assert finite_ratio > 0.3, f"Alpha030 有MKT因子时有效值比例过低: {finite_ratio:.2%}"
 
 
 # ======================================================================
