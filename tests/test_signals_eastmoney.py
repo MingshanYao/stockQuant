@@ -28,12 +28,11 @@ class TestEmGet:
                params={"secid": "1.600519", "fields": "f57,f58"},
                headers={"Referer": "https://quote.eastmoney.com/"},
                timeout=15)
-        t1 = time.time()
         em_get("https://push2.eastmoney.com/api/qt/stock/get",
                params={"secid": "0.000001", "fields": "f57,f58"},
                headers={"Referer": "https://quote.eastmoney.com/"},
                timeout=15)
-        elapsed = t1 - t0
+        elapsed = time.time() - t0
         assert elapsed >= EM_MIN_INTERVAL, \
             f"间隔 {elapsed:.2f}s < {EM_MIN_INTERVAL}s"
 
