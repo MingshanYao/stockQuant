@@ -8,6 +8,7 @@ stockQuant 信号数据层。
 
     from stockquant.signals import (
         get_fund_flow,              # 个股资金流向 120 日
+        get_fund_flow_minute,       # 个股资金流向 分钟级
         get_margin_trading,         # 融资融券明细
         get_northbound_realtime,    # 北向资金实时分钟流向
         get_northbound_history,     # 北向资金历史日级
@@ -71,7 +72,7 @@ from stockquant.signals.finance import (
     get_sina_financials,
     get_stock_info,
 )
-from stockquant.signals.fund_flow import get_fund_flow
+from stockquant.signals.fund_flow import get_fund_flow, get_fund_flow_minute
 from stockquant.signals.holders import get_holder_changes
 from stockquant.signals.hot import get_hot_stocks
 from stockquant.signals.industry import get_industry_ranking
@@ -128,6 +129,7 @@ __all__ = [
     "get_f10_profile",
     "get_finance_snapshot",
     "get_fund_flow",
+    "get_fund_flow_minute",
     "get_global_news",
     "get_holder_changes",
     "get_hot_stocks",

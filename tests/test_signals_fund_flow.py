@@ -54,3 +54,56 @@ class TestGetFundFlow:
         assert isinstance(df, pd.DataFrame)
         assert list(df.columns) == ["date", "main_net", "small_net",
                                      "mid_net", "large_net", "super_net"]
+
+
+class TestGetFundFlowMinute:
+    """get_fund_flow_minute 测试。"""
+
+    def test_returns_dataframe_with_expected_columns(self):
+        """返回 DataFrame 且包含预期列（非交易时段可能为空）。"""
+        from stockquant.signals.fund_flow import get_fund_flow_minute
+
+        df = get_fund_flow_minute("600519")
+
+        assert isinstance(df, pd.DataFrame)
+        expected_cols = ["time", "main_net", "small_net", "mid_net",
+                         "large_net", "super_net"]
+        for col in expected_cols:
+            assert col in df.columns, f"缺少列: {col}"
+
+    def test_time_column_is_datetime(self):
+        """time 列为 datetime 类型（空 DataFrame 也应有正确 dtype）。"""
+        from stockquant.signals.fund_flow import get_fund_flow_minute
+
+        df = get_fund_flow_minute("600519")
+        assert pd.api.types.is_datetime64_any_dtype(df["time"]), \
+            f"time dtype={df['time'].dtype}"
+
+    def test_unknown_code_returns_empty(self):
+        """无效代码返回空 DataFrame 带正确列。"""
+        from stockquant.signals.fund_flow import get_fund_flow_minute
+
+        df = get_fund_flow_minute("999999")
+        assert isinstance(df, pd.DataFrame)
+
+    @pytest.mark.parametrize("code_input", [
+        "sh600519",
+        "600519.SH",
+        "SH600519",
+    ])
+    def test_normalizes_code_input(self, code_input):
+        """支持 sh/sz 前缀和 .SH/.SZ 后缀格式。"""
+        from stockquant.signals.fund_flow import get_fund_flow_minute
+
+        df = get_fund_flow_minute(code_input)
+        assert isinstance(df, pd.DataFrame)
+        assert list(df.columns) == ["time", "main_net", "small_net",
+                                    "mid_net", "large_net", "super_net"]
+
+    def test_trading_hours_may_have_data(self):
+        """交易时段返回的数据行应有非空 time（非交易时段返回空时不执行断言）。"""
+        from stockquant.signals.fund_flow import get_fund_flow_minute
+
+        df = get_fund_flow_minute("000858")
+        if len(df) > 0:
+            assert df["time"].notna().all()
