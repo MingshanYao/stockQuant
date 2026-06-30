@@ -14,17 +14,39 @@ stockQuant 信号数据层。
         get_holder_changes,         # 股东户数变化
     )
 
+第二期（事件型）::
+
+    from stockquant.signals import (
+        get_dragon_tiger_board,     # 个股龙虎榜 + 买卖席位
+        get_daily_dragon_tiger,     # 全市场龙虎榜
+        get_lockup_expiry,          # 限售解禁日历
+        get_block_trade,            # 大宗交易
+        get_dividend_history,       # 分红送转历史
+    )
+
 设计文档: docs/superpowers/specs/2026-06-29-signals-layer-design.md
 """
 
+from stockquant.signals.block_trade import get_block_trade
+from stockquant.signals.dividend import get_dividend_history
+from stockquant.signals.dragon_tiger import (
+    get_daily_dragon_tiger,
+    get_dragon_tiger_board,
+)
 from stockquant.signals.fund_flow import get_fund_flow
 from stockquant.signals.holders import get_holder_changes
+from stockquant.signals.lockup import get_lockup_expiry
 from stockquant.signals.margin import get_margin_trading
 from stockquant.signals.northbound import get_northbound_history, get_northbound_realtime
 
 __all__ = [
+    "get_block_trade",
+    "get_daily_dragon_tiger",
+    "get_dividend_history",
+    "get_dragon_tiger_board",
     "get_fund_flow",
     "get_holder_changes",
+    "get_lockup_expiry",
     "get_margin_trading",
     "get_northbound_history",
     "get_northbound_realtime",
