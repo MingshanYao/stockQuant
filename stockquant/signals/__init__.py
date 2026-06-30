@@ -17,10 +17,15 @@ stockQuant 信号数据层。
 设计文档: docs/superpowers/specs/2026-06-29-signals-layer-design.md
 """
 
-# 第一期公开 API —— 各模块实现后逐步解除注释
-# from stockquant.signals.fund_flow import get_fund_flow
-# from stockquant.signals.margin import get_margin_trading
-# from stockquant.signals.northbound import get_northbound_realtime, get_northbound_history
-# from stockquant.signals.holders import get_holder_changes
+from stockquant.signals.fund_flow import get_fund_flow
+from stockquant.signals.holders import get_holder_changes
+from stockquant.signals.margin import get_margin_trading
+from stockquant.signals.northbound import get_northbound_history, get_northbound_realtime
 
-__all__: list[str] = []
+__all__ = [
+    "get_fund_flow",
+    "get_holder_changes",
+    "get_margin_trading",
+    "get_northbound_history",
+    "get_northbound_realtime",
+]
