@@ -56,19 +56,39 @@ from stockquant.signals.limit_up import (
 )
 from stockquant.signals.lockup import get_lockup_expiry
 from stockquant.signals.margin import get_margin_trading
+from stockquant.signals.news import get_global_news, get_stock_news
 from stockquant.signals.northbound import get_northbound_history, get_northbound_realtime
+from stockquant.signals.research import (
+    download_report_pdf,
+    get_consensus_eps,
+    get_industry_reports,
+    get_research_reports,
+)
+from stockquant.signals.sentiment import (
+    get_em_hot_concept,
+    get_em_hot_rank,
+    get_irm_qa,
+    get_ths_hot_list,
+)
 
 __all__ = [
+    "download_report_pdf",
     "get_block_trade",
     "get_broken_board_pool",
     "get_concept_blocks",
+    "get_consensus_eps",
     "get_daily_dragon_tiger",
     "get_dividend_history",
     "get_dragon_tiger_board",
+    "get_em_hot_concept",
+    "get_em_hot_rank",
     "get_fund_flow",
+    "get_global_news",
     "get_holder_changes",
     "get_hot_stocks",
     "get_industry_ranking",
+    "get_industry_reports",
+    "get_irm_qa",
     "get_limit_down_pool",
     "get_limit_up_pool",
     "get_limit_up_reasons",
@@ -77,5 +97,8 @@ __all__ = [
     "get_margin_trading",
     "get_northbound_history",
     "get_northbound_realtime",
+    "get_research_reports",
+    "get_stock_news",
+    "get_ths_hot_list",
     "get_yesterday_limit_up_pool",
 ]
