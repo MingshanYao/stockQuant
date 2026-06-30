@@ -2,11 +2,9 @@
 行情层 — 实时行情（补充 BaoStock / TickFlow 已有覆盖）。
 
 端点:
-  - mootdx (TCP 7709)      — 五档盘口 + 逐笔成交 (需 mootdx 依赖)
+  - mootdx (TCP 7709)      — K线 + 五档盘口 + 逐笔成交 (需 mootdx 依赖)
   - 腾讯财经 API (HTTP)    — PE/PB/市值/换手率/涨跌停/指数/ETF (GBK, 不封IP)
   - 百度股市通 (HTTP)      — K线带MA5/10/20 (零鉴权)
-
-注: K线行情已由 TickFlow 覆盖，此模块仅补充盘口/估值/涨跌停等行情层信号。
 """
 
 from __future__ import annotations
@@ -95,6 +93,48 @@ def get_tencent_quotes(codes: list[str]) -> dict[str, dict]:
             "pe_static": float(vals[52]) if vals[52] else 0,
         }
     return result
+
+
+def get_bars(
+    code: str,
+    frequency: int = 9,
+    offset: int = 100,
+) -> pd.DataFrame:
+    """获取 K 线数据（mootdx TCP，可选依赖）。
+
+    频率值表 (mootdx 0.11.7):
+      0=5分钟  1=15分钟  2=30分钟  3=60分钟  4=日线
+      5=周线  6=月线  8=1分钟  9=日线(默认)  10=季线  11=年线
+
+    Parameters
+    ----------
+    code : str
+        6 位股票代码。
+    frequency : int
+        K线频率，默认 9（日线）。
+    offset : int
+        返回根数，默认 100。
+
+    Returns
+    -------
+    pd.DataFrame
+        列: open, close, high, low, vol, amount, datetime。
+        mootdx 未安装时返回空 DataFrame。
+    """
+    try:
+        from stockquant.signals._mootdx import tdx_client
+        client = tdx_client()
+        result = client.bars(symbol=code, frequency=frequency, offset=offset)
+    except ImportError as e:
+        logger.warning(f"mootdx 不可用: {e}")
+        return pd.DataFrame()
+    except Exception as e:
+        logger.warning(f"K线获取失败 code={code}: {e}")
+        return pd.DataFrame()
+
+    if not result:
+        return pd.DataFrame()
+    return pd.DataFrame(result)
 
 
 def get_level2_orderbook(code: str, n: int = 5) -> pd.DataFrame:

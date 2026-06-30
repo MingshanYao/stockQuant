@@ -45,6 +45,9 @@ stockQuant 信号数据层。
 
     from stockquant.signals import (
         get_tencent_quotes,         # 腾讯实时行情 PE/PB/市值
+        get_bars,                   # mootdx K线 (多频率)
+        get_level2_orderbook,       # mootdx 五档盘口
+        get_tick_transactions,      # mootdx 逐笔成交
         get_baidu_kline_ma,         # 百度K线带MA均线
         get_stock_info,             # 东财个股基本面
         get_sina_financials,        # 新浪财报三表
@@ -53,6 +56,8 @@ stockQuant 信号数据层。
         get_option_tquote,          # 期权T型报价
         get_option_greeks,          # 期权希腊字母+IV
         iwencai_search,             # NL语义搜索研报
+        dedup_articles,             # iwencai 搜索结果去重
+        full_valuation,             # 单票完整估值分析
     )
 
 设计文档: docs/superpowers/specs/2026-06-29-signals-layer-design.md
@@ -76,7 +81,7 @@ from stockquant.signals.fund_flow import get_fund_flow, get_fund_flow_minute
 from stockquant.signals.holders import get_holder_changes
 from stockquant.signals.hot import get_hot_stocks
 from stockquant.signals.industry import get_industry_ranking
-from stockquant.signals.iwencai import iwencai_query, iwencai_search
+from stockquant.signals.iwencai import dedup_articles, iwencai_query, iwencai_search
 from stockquant.signals.limit_up import (
     get_broken_board_pool,
     get_limit_down_pool,
@@ -96,6 +101,7 @@ from stockquant.signals.options import (
 )
 from stockquant.signals.quote import (
     get_baidu_kline_ma,
+    get_bars,
     get_level2_orderbook,
     get_tencent_quotes,
     get_tick_transactions,
@@ -106,6 +112,12 @@ from stockquant.signals.research import (
     get_industry_reports,
     get_research_reports,
 )
+from stockquant.signals.valuation import (
+    calc_peg,
+    forward_pe,
+    full_valuation,
+    pe_digestion,
+)
 from stockquant.signals.sentiment import (
     get_em_hot_concept,
     get_em_hot_rank,
@@ -114,9 +126,14 @@ from stockquant.signals.sentiment import (
 )
 
 __all__ = [
+    "calc_peg",
+    "dedup_articles",
     "download_report_pdf",
+    "forward_pe",
+    "full_valuation",
     "get_announcements",
     "get_baidu_kline_ma",
+    "get_bars",
     "get_block_trade",
     "get_broken_board_pool",
     "get_concept_blocks",
@@ -158,4 +175,5 @@ __all__ = [
     "get_yesterday_limit_up_pool",
     "iwencai_query",
     "iwencai_search",
+    "pe_digestion",
 ]

@@ -192,3 +192,25 @@ def iwencai_query(query: str, page: int = 1, limit: int = 50) -> pd.DataFrame:
     if not rows:
         return pd.DataFrame()
     return pd.DataFrame(rows)
+
+
+def dedup_articles(articles: list[dict]) -> list[dict]:
+    """对 iwencai 搜索结果去重 — 同一 uid 仅保留 score 最高的条目。
+
+    Parameters
+    ----------
+    articles : list[dict]
+        ``iwencai_search`` 返回的原始数据（DataFrame.to_dict("records")）。
+
+    Returns
+    -------
+    list[dict]
+        按 publish_date 降序排列的去重后列表。
+    """
+    best: dict[str, dict] = {}
+    for a in articles:
+        uid = a.get("uid", "") or f"{a.get('title', '')}|{a.get('publish_date', '')}"
+        score = float(a.get("score", 0))
+        if uid not in best or score > float(best[uid].get("score", 0)):
+            best[uid] = a
+    return sorted(best.values(), key=lambda x: str(x.get("publish_date", "")), reverse=True)

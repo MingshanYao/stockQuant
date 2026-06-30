@@ -8,13 +8,13 @@ class TestGetHotStocks:
     """get_hot_stocks 测试。"""
 
     def test_returns_dataframe_with_expected_columns(self):
-        """返回 DataFrame 含关键列。"""
+        """返回 DataFrame 含核心列（code/name/reason/market 必有；行情字段按 API 返回）。"""
         from stockquant.signals.hot import get_hot_stocks
 
         df = get_hot_stocks("2026-05-09")
         assert isinstance(df, pd.DataFrame)
         assert not df.empty, "交易日应有强势股数据"
-        key_cols = ["code", "name", "reason", "date", "market"]
+        key_cols = ["code", "name", "reason", "market"]
         for col in key_cols:
             assert col in df.columns, f"缺少列: {col}"
 
@@ -35,6 +35,15 @@ class TestGetHotStocks:
 
         df = get_hot_stocks("2020-01-01")
         assert isinstance(df, pd.DataFrame)
+
+    def test_ddejingliang_is_numeric_when_available(self):
+        """若 API 返回 ddejingliang (大单净量)，应为数值列。"""
+        from stockquant.signals.hot import get_hot_stocks
+
+        df = get_hot_stocks("2026-05-09")
+        if "ddejingliang" in df.columns:
+            assert pd.api.types.is_numeric_dtype(df["ddejingliang"]), \
+                f"ddejingliang dtype={df['ddejingliang'].dtype}"
 
     def test_default_date_works(self):
         """默认日期（今天）不抛异常。"""

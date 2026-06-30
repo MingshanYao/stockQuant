@@ -3,8 +3,8 @@
 
 端点: zx.10jqka.com.cn (同花顺, 零鉴权, 不走东财限流)
 
-返回字段: code, name, reason (题材归因标签), date, market。
-价格/涨幅等行情数据需配合腾讯财经或 mootdx 补充。
+返回全部同花顺字段: code, name, reason (题材归因标签),
+close, zhangfu, huanshou, chengjiaoe, ddejingliang, market 等。
 """
 
 from __future__ import annotations
@@ -34,7 +34,12 @@ _SESSION.headers.update(HOT_HEADERS)
 _MAX_RETRIES = 3
 _RETRY_BACKOFF = 1.0
 
-HOT_COLS = ("code", "name", "reason", "date", "market")
+HOT_COLS = (
+    "code", "name", "reason",
+    "close", "zhangdie", "zhangfu", "huanshou",
+    "chengjiaoe", "chengjiaoliang", "ddejingliang",
+    "market",
+)
 
 
 def get_hot_stocks(
@@ -44,9 +49,7 @@ def get_hot_stocks(
 
     核心价值：同花顺编辑部人工运营的题材标签，如
     "算力租赁+Token工厂+AI政务"，适合题材归因和热点追踪。
-
-    Note: 此端点仅返回代码/名称/题材/日期/市场，不含行情数据。
-    如需价格/涨幅，可配合腾讯财经 ``tencent_quote()`` 补充。
+    同时返回行情字段，无需额外查腾讯财经。
 
     Parameters
     ----------
@@ -56,7 +59,10 @@ def get_hot_stocks(
     Returns
     -------
     pd.DataFrame
-        列: code, name, reason (题材归因), date, market (市场代码)。
+        列: code, name, reason (题材归因), close (收盘价),
+        zhangdie (涨跌额), zhangfu (涨幅%), huanshou (换手率%),
+        chengjiaoe (成交额), chengjiaoliang (成交量),
+        ddejingliang (大单净量/主力净流入), market (市场)。
         非交易日或请求失败时返回空 DataFrame。
     """
     trade_date = ensure_date(date) or dt.date.today()
