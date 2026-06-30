@@ -41,3 +41,16 @@ class TestGetHolderChanges:
 
         df = get_holder_changes("600519", periods=3)
         assert len(df) <= 3, f"请求3期, 实际返回{len(df)}行"
+
+    @pytest.mark.parametrize("code_input", [
+        "sh600519",
+        "600519.SH",
+        "SH600519",
+    ])
+    def test_normalizes_code_input(self, code_input):
+        """支持 sh/sz 前缀和 .SH/.SZ 后缀格式。"""
+        from stockquant.signals.holders import get_holder_changes
+
+        df = get_holder_changes(code_input, periods=3)
+        assert isinstance(df, pd.DataFrame)
+        assert not df.empty, f"代码 {code_input} 归一化后应有数据"

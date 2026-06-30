@@ -7,8 +7,10 @@
 from __future__ import annotations
 
 import pandas as pd
+import requests
 
 from stockquant.signals._eastmoney import em_datacenter
+from stockquant.utils.helpers import normalize_stock_code
 from stockquant.utils.logger import get_logger
 
 logger = get_logger("signals.holders")
@@ -26,7 +28,7 @@ def get_holder_changes(code: str, periods: int = 10) -> pd.DataFrame:
     Parameters
     ----------
     code : str
-        6 位股票代码。
+        6 位股票代码，支持 ``"600519"`` / ``"sh600519"`` / ``"600519.SH"``。
     periods : int
         返回最近多少期（季度），默认 10。
 
@@ -40,6 +42,8 @@ def get_holder_changes(code: str, periods: int = 10) -> pd.DataFrame:
         - change_ratio  — 较上期变化比例 (%)
         - avg_shares    — 户均持股数（股）
     """
+    code = normalize_stock_code(code)
+
     try:
         data = em_datacenter(
             "RPT_HOLDERNUMLATEST",
@@ -48,8 +52,11 @@ def get_holder_changes(code: str, periods: int = 10) -> pd.DataFrame:
             sort_columns="END_DATE",
             sort_types="-1",
         )
-    except Exception as e:
+    except (requests.ConnectionError, requests.Timeout) as e:
         logger.warning(f"股东户数请求失败 code={code}: {e}")
+        return pd.DataFrame(columns=list(HOLDER_COLS))
+    except Exception:
+        logger.exception(f"股东户数未预期错误 code={code}")
         return pd.DataFrame(columns=list(HOLDER_COLS))
 
     if not data:

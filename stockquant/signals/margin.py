@@ -7,8 +7,10 @@
 from __future__ import annotations
 
 import pandas as pd
+import requests
 
 from stockquant.signals._eastmoney import em_datacenter
+from stockquant.utils.helpers import normalize_stock_code
 from stockquant.utils.logger import get_logger
 
 logger = get_logger("signals.margin")
@@ -23,7 +25,7 @@ def get_margin_trading(code: str, page_size: int = 30) -> pd.DataFrame:
     Parameters
     ----------
     code : str
-        6 位股票代码。
+        6 位股票代码，支持 ``"600519"`` / ``"sh600519"`` / ``"600519.SH"``。
     page_size : int
         返回最近多少条记录，默认 30。
 
@@ -40,6 +42,8 @@ def get_margin_trading(code: str, page_size: int = 30) -> pd.DataFrame:
         - rqchl      — 融券偿还量 (股)
         - rzrqye     — 融资融券余额合计 (元)
     """
+    code = normalize_stock_code(code)
+
     try:
         data = em_datacenter(
             "RPTA_WEB_RZRQ_GGMX",
@@ -48,8 +52,11 @@ def get_margin_trading(code: str, page_size: int = 30) -> pd.DataFrame:
             sort_columns="DATE",
             sort_types="-1",
         )
-    except Exception as e:
+    except (requests.ConnectionError, requests.Timeout) as e:
         logger.warning(f"融资融券请求失败 code={code}: {e}")
+        return pd.DataFrame(columns=list(MARGIN_COLS))
+    except Exception:
+        logger.exception(f"融资融券未预期错误 code={code}")
         return pd.DataFrame(columns=list(MARGIN_COLS))
 
     if not data:

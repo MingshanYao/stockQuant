@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import random
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -24,6 +26,12 @@ HSGT_HEADERS = {
     "Referer": "https://data.hexin.cn/",
 }
 
+_SESSION = requests.Session()
+_SESSION.headers.update(HSGT_HEADERS)
+
+_MAX_RETRIES = 3
+_RETRY_BACKOFF = 1.0
+
 _CACHE_DIR = Path.home() / ".tradingagents" / "cache"
 
 
@@ -38,31 +46,46 @@ def get_northbound_realtime() -> pd.DataFrame:
         非交易时段返回含历史缓存的空 DataFrame。
     """
     url = "https://data.hexin.cn/market/hsgtApi/method/dayChart/"
-    try:
-        r = requests.get(url, headers=HSGT_HEADERS, timeout=10)
-        d = r.json()
-    except Exception as e:
-        logger.warning(f"北向资金实时请求失败: {e}")
+
+    last_exc = None
+    for attempt in range(_MAX_RETRIES):
+        try:
+            r = _SESSION.get(url, timeout=10)
+            d = r.json()
+            break
+        except (requests.ConnectionError, requests.Timeout) as e:
+            last_exc = e
+            if attempt < _MAX_RETRIES - 1:
+                backoff = _RETRY_BACKOFF * (2 ** attempt)
+                logger.warning(
+                    f"北向资金请求失败 (第{attempt + 1}次): {e}，"
+                    f"{backoff:.1f}s 后重试..."
+                )
+                time.sleep(backoff + random.uniform(0, 0.3))
+        except ValueError as e:
+            logger.warning(f"北向资金 JSON 解析失败: {e}")
+            return pd.DataFrame(columns=["time", "hgt_yi", "sgt_yi"])
+    else:
+        logger.warning(f"北向资金请求失败 (已重试{_MAX_RETRIES}次): {last_exc}")
         return pd.DataFrame(columns=["time", "hgt_yi", "sgt_yi"])
 
     times = d.get("time") or []
     hgt = d.get("hgt") or []
     sgt = d.get("sgt") or []
-    n = len(times)
 
-    # 对齐长度
-    hgt_padded = hgt[:n] + [None] * (n - len(hgt))
-    sgt_padded = sgt[:n] + [None] * (n - len(sgt))
+    # 截断到最短长度，避免不齐时填 None 导致数据错位
+    min_len = min(len(times), len(hgt), len(sgt))
+    times = times[:min_len]
+    hgt = hgt[:min_len]
+    sgt = sgt[:min_len]
 
     df = pd.DataFrame({
         "time": times,
-        "hgt_yi": hgt_padded,
-        "sgt_yi": sgt_padded,
+        "hgt_yi": hgt,
+        "sgt_yi": sgt,
     })
 
-    # 自动缓存当日收盘快照
     _save_snapshot(df)
-
     return df
 
 
@@ -101,7 +124,8 @@ def _save_snapshot(df: pd.DataFrame) -> None:
         return
 
     last = valid.iloc[-1]
-    date_str = str(last["time"])[:10] if last["time"] else ""
+    time_val = last["time"]
+    date_str = str(time_val)[:10] if time_val else ""
 
     if not date_str:
         return
@@ -109,7 +133,6 @@ def _save_snapshot(df: pd.DataFrame) -> None:
     _CACHE_DIR.mkdir(parents=True, exist_ok=True)
     path = _CACHE_DIR / "northbound_daily.csv"
 
-    # 读取已有行
     rows: dict[str, str] = {}
     if path.exists():
         for line in path.read_text().strip().split("\n")[1:]:

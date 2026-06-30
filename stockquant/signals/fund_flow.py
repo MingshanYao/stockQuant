@@ -7,14 +7,16 @@
 from __future__ import annotations
 
 import pandas as pd
+import requests
 
 from stockquant.signals._eastmoney import em_get, UA
+from stockquant.utils.helpers import get_market_prefix, normalize_stock_code
 from stockquant.utils.logger import get_logger
 
 logger = get_logger("signals.fund_flow")
 
-FUND_FLOW_COLS = ["date", "main_net", "small_net", "mid_net",
-                  "large_net", "super_net"]
+FUND_FLOW_COLS = ("date", "main_net", "small_net", "mid_net",
+                  "large_net", "super_net")
 
 
 def get_fund_flow(code: str, days: int = 120) -> pd.DataFrame:
@@ -23,7 +25,7 @@ def get_fund_flow(code: str, days: int = 120) -> pd.DataFrame:
     Parameters
     ----------
     code : str
-        6 位股票代码，如 ``"600519"``。
+        6 位股票代码，支持 ``"600519"`` / ``"sh600519"`` / ``"600519.SH"``。
     days : int
         拉取最近多少个交易日，默认 120。
 
@@ -31,9 +33,12 @@ def get_fund_flow(code: str, days: int = 120) -> pd.DataFrame:
     -------
     pd.DataFrame
         列: date, main_net, small_net, mid_net, large_net, super_net。
-        金额单位: **元**。空结果时返回带列名的空 DataFrame。
+        金额单位: **元**。请求失败时返回带列名的空 DataFrame。
     """
-    market_code = 1 if code.startswith("6") else 0
+    code = normalize_stock_code(code)
+    prefix = get_market_prefix(code)
+    market_code = 1 if prefix == "sh" else 0
+
     url = "https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get"
     params = {
         "secid": f"{market_code}.{code}",
@@ -49,9 +54,12 @@ def get_fund_flow(code: str, days: int = 120) -> pd.DataFrame:
     try:
         r = em_get(url, params=params, headers=headers, timeout=15)
         d = r.json()
-    except Exception as e:
+    except (requests.ConnectionError, requests.Timeout, ValueError) as e:
         logger.warning(f"资金流向请求失败 code={code}: {e}")
-        return pd.DataFrame(columns=FUND_FLOW_COLS)
+        return pd.DataFrame(columns=list(FUND_FLOW_COLS))
+    except Exception:
+        logger.exception(f"资金流向未预期错误 code={code}")
+        return pd.DataFrame(columns=list(FUND_FLOW_COLS))
 
     klines = (d.get("data") or {}).get("klines") or []
     rows = []
@@ -68,7 +76,7 @@ def get_fund_flow(code: str, days: int = 120) -> pd.DataFrame:
             })
 
     if not rows:
-        return pd.DataFrame(columns=FUND_FLOW_COLS)
+        return pd.DataFrame(columns=list(FUND_FLOW_COLS))
 
     df = pd.DataFrame(rows)
     df["date"] = pd.to_datetime(df["date"])

@@ -34,3 +34,16 @@ class TestGetMarginTrading:
         df = get_margin_trading("600519", page_size=3)
         assert df["rzye"].dtype.kind in ("i", "f"), \
             f"rzye 应为数值, 实际 {df['rzye'].dtype}"
+
+    @pytest.mark.parametrize("code_input", [
+        "sh600519",
+        "600519.SH",
+        "SH600519",
+    ])
+    def test_normalizes_code_input(self, code_input):
+        """支持 sh/sz 前缀和 .SH/.SZ 后缀格式。"""
+        from stockquant.signals.margin import get_margin_trading
+
+        df = get_margin_trading(code_input, page_size=3)
+        assert isinstance(df, pd.DataFrame)
+        assert not df.empty, f"代码 {code_input} 归一化后应有数据"
