@@ -4,6 +4,7 @@
 提供:
     em_get()          — 带串行限流 + 重试的 GET，所有 eastmoney.com 端点专用
     em_datacenter()   — datacenter-web 通用查询模板（龙虎榜/融资融券/股东户数等共用）
+    empty_df()        — 构造空 DataFrame，自动将 date/time 列转为 datetime64 类型
 
 限流规则: 两次请求最小间隔 1.0 秒 + 随机抖动(0.1~0.5秒)，串行不并发。
 所有东财端点必须走 em_get/em_datacenter，禁止裸 requests.get 直接打东财。
@@ -14,6 +15,7 @@ from __future__ import annotations
 import random
 import time
 
+import pandas as pd
 import requests
 from requests.adapters import HTTPAdapter
 
@@ -169,3 +171,28 @@ def em_datacenter(
     if result is None:
         return []
     return result.get("data") or []
+
+
+def empty_df(columns: tuple[str, ...],
+             date_cols: tuple[str, ...] = ()) -> pd.DataFrame:
+    """构造带正确 dtype 的空 DataFrame。
+
+    解决东财软封禁返回空数据时 ``pd.DataFrame(columns=...)`` 导致
+    date 列变成 object dtype、下游断言 ``is_datetime64_any_dtype`` 失败。
+
+    Parameters
+    ----------
+    columns : tuple[str, ...]
+        列名。
+    date_cols : tuple[str, ...]
+        需要转为 datetime64 的列名（默认空，常见 ``("date",)`` / ``("time",)``）。
+
+    Returns
+    -------
+    pd.DataFrame
+    """
+    df = pd.DataFrame(columns=list(columns))
+    for col in date_cols:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col])
+    return df

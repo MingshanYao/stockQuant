@@ -10,7 +10,7 @@ import pandas as pd
 import requests
 
 from stockquant.signals._cninfo import _cninfo_orgid, _cninfo_ts_to_date
-from stockquant.signals._eastmoney import UA
+from stockquant.signals._eastmoney import UA, empty_df
 from stockquant.utils.helpers import normalize_stock_code
 from stockquant.utils.logger import get_logger
 
@@ -70,13 +70,13 @@ def get_announcements(code: str, page_size: int = 30) -> pd.DataFrame:
         d = r.json()
     except (requests.ConnectionError, requests.Timeout) as e:
         logger.warning(f"巨潮公告请求失败 code={code}: {e}")
-        return pd.DataFrame(columns=list(ANNOUNCE_COLS))
+        return empty_df(ANNOUNCE_COLS, ("date",))
     except (ValueError, KeyError) as e:
         logger.warning(f"巨潮公告 JSON 解析失败 code={code}: {e}")
-        return pd.DataFrame(columns=list(ANNOUNCE_COLS))
+        return empty_df(ANNOUNCE_COLS, ("date",))
     except Exception:
         logger.exception(f"巨潮公告未预期错误 code={code}")
-        return pd.DataFrame(columns=list(ANNOUNCE_COLS))
+        return empty_df(ANNOUNCE_COLS, ("date",))
 
     rows = []
     for item in d.get("announcements", []) or []:
@@ -91,7 +91,7 @@ def get_announcements(code: str, page_size: int = 30) -> pd.DataFrame:
         })
 
     if not rows:
-        return pd.DataFrame(columns=list(ANNOUNCE_COLS))
+        return empty_df(ANNOUNCE_COLS, ("date",))
 
     df = pd.DataFrame(rows)
     df["date"] = pd.to_datetime(df["date"], errors="coerce")

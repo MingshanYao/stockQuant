@@ -9,7 +9,7 @@ from __future__ import annotations
 import pandas as pd
 import requests
 
-from stockquant.signals._eastmoney import em_datacenter
+from stockquant.signals._eastmoney import em_datacenter, empty_df
 from stockquant.utils.helpers import normalize_stock_code
 from stockquant.utils.logger import get_logger
 
@@ -53,13 +53,13 @@ def get_dividend_history(code: str, page_size: int = 20) -> pd.DataFrame:
         )
     except (requests.ConnectionError, requests.Timeout) as e:
         logger.warning(f"分红送转请求失败 code={code}: {e}")
-        return pd.DataFrame(columns=list(DIVIDEND_COLS))
+        return empty_df(DIVIDEND_COLS, ("date",))
     except Exception:
         logger.exception(f"分红送转未预期错误 code={code}")
-        return pd.DataFrame(columns=list(DIVIDEND_COLS))
+        return empty_df(DIVIDEND_COLS, ("date",))
 
     if not data:
-        return pd.DataFrame(columns=list(DIVIDEND_COLS))
+        return empty_df(DIVIDEND_COLS, ("date",))
 
     rows = []
     for row in data:

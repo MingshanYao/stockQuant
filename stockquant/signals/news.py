@@ -14,7 +14,7 @@ import uuid
 
 import pandas as pd
 
-from stockquant.signals._eastmoney import em_get
+from stockquant.signals._eastmoney import em_get, empty_df
 from stockquant.utils.helpers import normalize_stock_code
 from stockquant.utils.logger import get_logger
 
@@ -77,7 +77,7 @@ def get_stock_news(code: str, page_size: int = 20) -> pd.DataFrame:
         )
     except Exception:
         logger.exception(f"个股新闻请求失败 code={code}")
-        return pd.DataFrame(columns=list(STOCK_NEWS_COLS))
+        return empty_df(STOCK_NEWS_COLS, ("time",))
 
     try:
         text = r.text
@@ -85,7 +85,7 @@ def get_stock_news(code: str, page_size: int = 20) -> pd.DataFrame:
         d = json.loads(json_str)
     except (ValueError, json.JSONDecodeError) as e:
         logger.warning(f"个股新闻 JSONP 解析失败 code={code}: {e}")
-        return pd.DataFrame(columns=list(STOCK_NEWS_COLS))
+        return empty_df(STOCK_NEWS_COLS, ("time",))
 
     articles = d.get("result", {}).get("cmsArticleWebOld", []) or []
     if isinstance(articles, dict):
@@ -102,7 +102,7 @@ def get_stock_news(code: str, page_size: int = 20) -> pd.DataFrame:
         })
 
     if not rows:
-        return pd.DataFrame(columns=list(STOCK_NEWS_COLS))
+        return empty_df(STOCK_NEWS_COLS, ("time",))
 
     df = pd.DataFrame(rows)
     df["time"] = pd.to_datetime(df["time"], errors="coerce")
@@ -144,7 +144,7 @@ def get_global_news(page_size: int = 50) -> pd.DataFrame:
         d = r.json()
     except Exception:
         logger.exception("全球资讯请求失败")
-        return pd.DataFrame(columns=list(GLOBAL_NEWS_COLS))
+        return empty_df(GLOBAL_NEWS_COLS, ("time",))
 
     items = d.get("data", {}).get("fastNewsList") or []
     rows = []
@@ -156,7 +156,7 @@ def get_global_news(page_size: int = 50) -> pd.DataFrame:
         })
 
     if not rows:
-        return pd.DataFrame(columns=list(GLOBAL_NEWS_COLS))
+        return empty_df(GLOBAL_NEWS_COLS, ("time",))
 
     df = pd.DataFrame(rows)
     df["time"] = pd.to_datetime(df["time"], errors="coerce")

@@ -56,12 +56,16 @@ def get_fund_flow(code: str, days: int = 120) -> pd.DataFrame:
         d = r.json()
     except (requests.ConnectionError, requests.Timeout, ValueError) as e:
         logger.warning(f"资金流向请求失败 code={code}: {e}")
-        return pd.DataFrame(columns=list(FUND_FLOW_COLS))
+        return _empty_fund_flow()
     except Exception:
         logger.exception(f"资金流向未预期错误 code={code}")
-        return pd.DataFrame(columns=list(FUND_FLOW_COLS))
+        return _empty_fund_flow()
 
     klines = (d.get("data") or {}).get("klines") or []
+    if not klines:
+        logger.info(f"资金流向返回空数据 code={code}（可能被东财间歇风控）")
+        return _empty_fund_flow()
+
     rows = []
     for line in klines:
         parts = line.split(",")
@@ -76,8 +80,14 @@ def get_fund_flow(code: str, days: int = 120) -> pd.DataFrame:
             })
 
     if not rows:
-        return pd.DataFrame(columns=list(FUND_FLOW_COLS))
+        return _empty_fund_flow()
 
     df = pd.DataFrame(rows)
+    df["date"] = pd.to_datetime(df["date"])
+    return df
+
+
+def _empty_fund_flow() -> pd.DataFrame:
+    df = pd.DataFrame(columns=list(FUND_FLOW_COLS))
     df["date"] = pd.to_datetime(df["date"])
     return df

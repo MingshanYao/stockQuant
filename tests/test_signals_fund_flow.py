@@ -20,11 +20,12 @@ class TestGetFundFlow:
             assert col in df.columns, f"缺少列: {col}"
 
     def test_date_column_is_datetime(self):
-        """date 列为 datetime 类型。"""
+        """date 列为 datetime 类型（空 DataFrame 也应有正确 dtype）。"""
         from stockquant.signals.fund_flow import get_fund_flow
 
         df = get_fund_flow("600519", days=5)
-        assert pd.api.types.is_datetime64_any_dtype(df["date"])
+        assert pd.api.types.is_datetime64_any_dtype(df["date"]), \
+            f"date dtype={df['date'].dtype}, 可能被东财软封禁返回空数据"
 
     def test_respects_days_parameter(self):
         """days 参数控制返回行数不超过预期。"""

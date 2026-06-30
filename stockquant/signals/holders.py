@@ -9,7 +9,7 @@ from __future__ import annotations
 import pandas as pd
 import requests
 
-from stockquant.signals._eastmoney import em_datacenter
+from stockquant.signals._eastmoney import em_datacenter, empty_df
 from stockquant.utils.helpers import normalize_stock_code
 from stockquant.utils.logger import get_logger
 
@@ -54,13 +54,13 @@ def get_holder_changes(code: str, periods: int = 10) -> pd.DataFrame:
         )
     except (requests.ConnectionError, requests.Timeout) as e:
         logger.warning(f"股东户数请求失败 code={code}: {e}")
-        return pd.DataFrame(columns=list(HOLDER_COLS))
+        return empty_df(HOLDER_COLS, ("date",))
     except Exception:
         logger.exception(f"股东户数未预期错误 code={code}")
-        return pd.DataFrame(columns=list(HOLDER_COLS))
+        return empty_df(HOLDER_COLS, ("date",))
 
     if not data:
-        return pd.DataFrame(columns=list(HOLDER_COLS))
+        return empty_df(HOLDER_COLS, ("date",))
 
     rows = []
     for row in data:

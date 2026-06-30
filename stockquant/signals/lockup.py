@@ -11,7 +11,7 @@ import datetime as dt
 import pandas as pd
 import requests
 
-from stockquant.signals._eastmoney import em_datacenter
+from stockquant.signals._eastmoney import em_datacenter, empty_df
 from stockquant.utils.helpers import ensure_date, normalize_stock_code
 from stockquant.utils.logger import get_logger
 
@@ -46,7 +46,7 @@ def get_lockup_expiry(
     trade_date = ensure_date(date) or dt.date.today()
 
     # 1. 历史解禁
-    history = pd.DataFrame(columns=list(LOCKUP_COLS))
+    history = empty_df(LOCKUP_COLS, ("date",))
     try:
         hist_data = em_datacenter(
             "RPT_LIFT_STAGE",
@@ -75,7 +75,7 @@ def get_lockup_expiry(
         history["date"] = pd.to_datetime(history["date"])
 
     # 2. 未来待解禁
-    upcoming = pd.DataFrame(columns=list(LOCKUP_COLS))
+    upcoming = empty_df(LOCKUP_COLS, ("date",))
     end_date = trade_date + dt.timedelta(days=forward_days)
     date_str = trade_date.strftime("%Y-%m-%d")
     end_str = end_date.strftime("%Y-%m-%d")

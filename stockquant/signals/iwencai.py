@@ -16,6 +16,7 @@ import secrets
 import pandas as pd
 import requests
 
+from stockquant.signals._eastmoney import empty_df
 from stockquant.utils.helpers import normalize_stock_code
 from stockquant.utils.logger import get_logger
 
@@ -67,7 +68,7 @@ def iwencai_search(query: str, channel: str = "report",
         列: uid, title, publish_date, score, summary, source。
     """
     if not _check_key():
-        return pd.DataFrame(columns=list(SEARCH_COLS))
+        return empty_df(SEARCH_COLS, ("publish_date",))
 
     headers = {
         "Authorization": f"Bearer {IWENCAI_KEY}",
@@ -88,28 +89,28 @@ def iwencai_search(query: str, channel: str = "report",
         )
     except (requests.ConnectionError, requests.Timeout) as e:
         logger.warning(f"iwencai 搜索请求失败: {e}")
-        return pd.DataFrame(columns=list(SEARCH_COLS))
+        return empty_df(SEARCH_COLS, ("publish_date",))
     except Exception:
         logger.exception("iwencai 搜索未预期错误")
-        return pd.DataFrame(columns=list(SEARCH_COLS))
+        return empty_df(SEARCH_COLS, ("publish_date",))
 
     if r.status_code != 200:
         logger.warning(f"iwencai HTTP {r.status_code}: {r.text[:200]}")
-        return pd.DataFrame(columns=list(SEARCH_COLS))
+        return empty_df(SEARCH_COLS, ("publish_date",))
 
     try:
         data = r.json()
     except ValueError as e:
         logger.warning(f"iwencai JSON 解析失败: {e}")
-        return pd.DataFrame(columns=list(SEARCH_COLS))
+        return empty_df(SEARCH_COLS, ("publish_date",))
 
     if data.get("status_code", 0) != 0:
         logger.warning(f"iwencai API 错误: {data.get('status_msg', '')}")
-        return pd.DataFrame(columns=list(SEARCH_COLS))
+        return empty_df(SEARCH_COLS, ("publish_date",))
 
     articles = data.get("data") or []
     if not articles:
-        return pd.DataFrame(columns=list(SEARCH_COLS))
+        return empty_df(SEARCH_COLS, ("publish_date",))
 
     rows = []
     for a in articles:

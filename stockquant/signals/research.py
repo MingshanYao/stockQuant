@@ -15,7 +15,7 @@ from pathlib import Path
 import pandas as pd
 import requests
 
-from stockquant.signals._eastmoney import UA, em_get
+from stockquant.signals._eastmoney import UA, em_get, empty_df
 from stockquant.utils.helpers import normalize_stock_code
 from stockquant.utils.logger import get_logger
 
@@ -95,7 +95,7 @@ def get_research_reports(
             break
 
     if not all_records:
-        return pd.DataFrame(columns=list(REPORT_COLS))
+        return empty_df(REPORT_COLS, ("publish_date",))
 
     processed = []
     for rec in all_records:
@@ -169,7 +169,7 @@ def get_industry_reports(
             break
 
     if not all_records:
-        return pd.DataFrame(columns=list(IND_REPORT_COLS))
+        return empty_df(IND_REPORT_COLS, ("publish_date",))
 
     processed = []
     for rec in all_records:

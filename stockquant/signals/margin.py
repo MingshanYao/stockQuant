@@ -9,7 +9,7 @@ from __future__ import annotations
 import pandas as pd
 import requests
 
-from stockquant.signals._eastmoney import em_datacenter
+from stockquant.signals._eastmoney import em_datacenter, empty_df
 from stockquant.utils.helpers import normalize_stock_code
 from stockquant.utils.logger import get_logger
 
@@ -54,13 +54,13 @@ def get_margin_trading(code: str, page_size: int = 30) -> pd.DataFrame:
         )
     except (requests.ConnectionError, requests.Timeout) as e:
         logger.warning(f"融资融券请求失败 code={code}: {e}")
-        return pd.DataFrame(columns=list(MARGIN_COLS))
+        return empty_df(MARGIN_COLS, ("date",))
     except Exception:
         logger.exception(f"融资融券未预期错误 code={code}")
-        return pd.DataFrame(columns=list(MARGIN_COLS))
+        return empty_df(MARGIN_COLS, ("date",))
 
     if not data:
-        return pd.DataFrame(columns=list(MARGIN_COLS))
+        return empty_df(MARGIN_COLS, ("date",))
 
     rows = []
     for row in data:

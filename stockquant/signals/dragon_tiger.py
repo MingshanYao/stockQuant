@@ -14,7 +14,7 @@ import datetime as dt
 import pandas as pd
 import requests
 
-from stockquant.signals._eastmoney import em_datacenter
+from stockquant.signals._eastmoney import em_datacenter, empty_df
 from stockquant.utils.helpers import ensure_date, normalize_stock_code
 from stockquant.utils.logger import get_logger
 
@@ -123,7 +123,7 @@ def get_dragon_tiger_board(
         )
 
     df = pd.DataFrame(records, columns=list(RECORD_COLS)) if records else \
-        pd.DataFrame(columns=list(RECORD_COLS))
+        empty_df(RECORD_COLS, ("date",))
     return {"records": df, "seats": seats, "institution": institution}
 
 
@@ -220,7 +220,7 @@ def _fetch_seat_details(code: str, trade_date: str) -> tuple[list, list]:
 
 def _empty_board_result() -> dict:
     return {
-        "records": pd.DataFrame(columns=list(RECORD_COLS)),
+        "records": empty_df(RECORD_COLS, ("date",)),
         "seats": {"buy": [], "sell": []},
         "institution": {"buy_wan": 0.0, "sell_wan": 0.0, "net_wan": 0.0},
     }
