@@ -30,11 +30,34 @@ stockQuant 信号数据层。
         get_hot_stocks,             # 同花顺强势股 + 题材归因
         get_concept_blocks,         # 个股板块/概念归属
         get_industry_ranking,       # 行业板块排名
+        get_limit_up_pool,          # 涨停池 + 连板梯队
+        get_limit_up_sentiment,     # 打板情绪温度计
+        get_research_reports,       # 东财个股研报
+        get_consensus_eps,          # 一致预期EPS
+        get_stock_news,             # 东财个股新闻
+        get_global_news,            # 7x24全球快讯
+        get_irm_qa,                 # 互动易问答
+        get_ths_hot_list,           # 同花顺热榜
+    )
+
+第四期（行情/基础/公告/期权）::
+
+    from stockquant.signals import (
+        get_tencent_quotes,         # 腾讯实时行情 PE/PB/市值
+        get_baidu_kline_ma,         # 百度K线带MA均线
+        get_stock_info,             # 东财个股基本面
+        get_sina_financials,        # 新浪财报三表
+        get_announcements,          # 巨潮公告全文检索
+        get_option_codes,           # ETF期权合约清单
+        get_option_tquote,          # 期权T型报价
+        get_option_greeks,          # 期权希腊字母+IV
+        iwencai_search,             # NL语义搜索研报
     )
 
 设计文档: docs/superpowers/specs/2026-06-29-signals-layer-design.md
 """
 
+from stockquant.signals.announcement import get_announcements
 from stockquant.signals.block_trade import get_block_trade
 from stockquant.signals.concept import get_concept_blocks
 from stockquant.signals.dividend import get_dividend_history
@@ -42,10 +65,17 @@ from stockquant.signals.dragon_tiger import (
     get_daily_dragon_tiger,
     get_dragon_tiger_board,
 )
+from stockquant.signals.finance import (
+    get_f10_profile,
+    get_finance_snapshot,
+    get_sina_financials,
+    get_stock_info,
+)
 from stockquant.signals.fund_flow import get_fund_flow
 from stockquant.signals.holders import get_holder_changes
 from stockquant.signals.hot import get_hot_stocks
 from stockquant.signals.industry import get_industry_ranking
+from stockquant.signals.iwencai import iwencai_query, iwencai_search
 from stockquant.signals.limit_up import (
     get_broken_board_pool,
     get_limit_down_pool,
@@ -58,6 +88,17 @@ from stockquant.signals.lockup import get_lockup_expiry
 from stockquant.signals.margin import get_margin_trading
 from stockquant.signals.news import get_global_news, get_stock_news
 from stockquant.signals.northbound import get_northbound_history, get_northbound_realtime
+from stockquant.signals.options import (
+    get_option_codes,
+    get_option_greeks,
+    get_option_tquote,
+)
+from stockquant.signals.quote import (
+    get_baidu_kline_ma,
+    get_level2_orderbook,
+    get_tencent_quotes,
+    get_tick_transactions,
+)
 from stockquant.signals.research import (
     download_report_pdf,
     get_consensus_eps,
@@ -73,6 +114,8 @@ from stockquant.signals.sentiment import (
 
 __all__ = [
     "download_report_pdf",
+    "get_announcements",
+    "get_baidu_kline_ma",
     "get_block_trade",
     "get_broken_board_pool",
     "get_concept_blocks",
@@ -82,6 +125,8 @@ __all__ = [
     "get_dragon_tiger_board",
     "get_em_hot_concept",
     "get_em_hot_rank",
+    "get_f10_profile",
+    "get_finance_snapshot",
     "get_fund_flow",
     "get_global_news",
     "get_holder_changes",
@@ -89,6 +134,7 @@ __all__ = [
     "get_industry_ranking",
     "get_industry_reports",
     "get_irm_qa",
+    "get_level2_orderbook",
     "get_limit_down_pool",
     "get_limit_up_pool",
     "get_limit_up_reasons",
@@ -97,8 +143,17 @@ __all__ = [
     "get_margin_trading",
     "get_northbound_history",
     "get_northbound_realtime",
+    "get_option_codes",
+    "get_option_greeks",
+    "get_option_tquote",
     "get_research_reports",
+    "get_sina_financials",
+    "get_stock_info",
     "get_stock_news",
+    "get_tencent_quotes",
     "get_ths_hot_list",
+    "get_tick_transactions",
     "get_yesterday_limit_up_pool",
+    "iwencai_query",
+    "iwencai_search",
 ]
