@@ -24,10 +24,19 @@ stockQuant 信号数据层。
         get_dividend_history,       # 分红送转历史
     )
 
+第三期（截面/文本型）::
+
+    from stockquant.signals import (
+        get_hot_stocks,             # 同花顺强势股 + 题材归因
+        get_concept_blocks,         # 个股板块/概念归属
+        get_industry_ranking,       # 行业板块排名
+    )
+
 设计文档: docs/superpowers/specs/2026-06-29-signals-layer-design.md
 """
 
 from stockquant.signals.block_trade import get_block_trade
+from stockquant.signals.concept import get_concept_blocks
 from stockquant.signals.dividend import get_dividend_history
 from stockquant.signals.dragon_tiger import (
     get_daily_dragon_tiger,
@@ -35,17 +44,22 @@ from stockquant.signals.dragon_tiger import (
 )
 from stockquant.signals.fund_flow import get_fund_flow
 from stockquant.signals.holders import get_holder_changes
+from stockquant.signals.hot import get_hot_stocks
+from stockquant.signals.industry import get_industry_ranking
 from stockquant.signals.lockup import get_lockup_expiry
 from stockquant.signals.margin import get_margin_trading
 from stockquant.signals.northbound import get_northbound_history, get_northbound_realtime
 
 __all__ = [
     "get_block_trade",
+    "get_concept_blocks",
     "get_daily_dragon_tiger",
     "get_dividend_history",
     "get_dragon_tiger_board",
     "get_fund_flow",
     "get_holder_changes",
+    "get_hot_stocks",
+    "get_industry_ranking",
     "get_lockup_expiry",
     "get_margin_trading",
     "get_northbound_history",
